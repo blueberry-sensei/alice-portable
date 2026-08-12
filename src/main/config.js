@@ -35,6 +35,7 @@ function rootDir() {
 
 const ROOT = rootDir();
 const DATA_DIR = path.join(ROOT, 'alice-data');
+const ALICES_DIR = path.join(DATA_DIR, 'alices');
 const RESOURCES_DIR = process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'runtime'))
   ? path.join(process.resourcesPath, 'runtime')
   : path.join(ROOT, 'runtime');
@@ -143,6 +144,7 @@ function saveSettings(next) {
 module.exports = {
   ROOT,
   DATA_DIR,
+  ALICES_DIR,
   RESOURCES_DIR,
   SETTINGS_PATH,
   DEFAULTS,
@@ -153,4 +155,7 @@ module.exports = {
   dbPath: () => path.join(DATA_DIR, 'alice.db'),
   workDir: () => path.join(DATA_DIR, 'workspace'),
   knowledgeDir: () => path.join(ROOT, 'knowledge'),
+  // Mỗi Alice một thư mục riêng: chat db, brain, opencode auth đều nằm trong đó.
+  alicesDir: () => ALICES_DIR,
+  aliceDir: (id) => path.join(ALICES_DIR, id),
 };

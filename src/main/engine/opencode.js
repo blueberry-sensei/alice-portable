@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const fs = require('node:fs');
 
-const { resolveOpencode } = require('../config');
+const { resolveOpencode, DATA_DIR } = require('../config');
 const { portableEnv } = require('./auth');
 
 /**
@@ -30,6 +30,14 @@ class OpencodeEngine {
     this.binPath = found.path;
     this.binSource = found.source; // bundled | host | missing
     this._child = null;
+    // Thư mục dữ liệu của ALICE ĐANG MỞ — auth/session của mỗi Alice nằm riêng.
+    // Mặc định là data dir cũ để test chạy không cần set; main gọi setBaseDir
+    // mỗi khi đổi Alice.
+    this.baseDir = DATA_DIR;
+  }
+
+  setBaseDir(dir) {
+    this.baseDir = dir;
   }
 
   get available() {
@@ -101,7 +109,7 @@ class OpencodeEngine {
       const child = spawn(this.binPath, args, {
         cwd,
         windowsHide: true,
-        env: { ...process.env, ...portableEnv(), FORCE_COLOR: '0', NO_COLOR: '1' },
+        env: { ...process.env, ...portableEnv(this.baseDir), FORCE_COLOR: '0', NO_COLOR: '1' },
         // `stdin: 'ignore'` — KHÔNG để mặc định 'pipe'.
         //
         // `opencode run` nhận thêm nội dung qua stdin, nên nếu stdin là một pipe
@@ -246,7 +254,7 @@ class OpencodeEngine {
     return new Promise((resolve, reject) => {
       const child = spawn(this.binPath, args, {
         windowsHide: true,
-        env: { ...process.env, ...portableEnv() },
+        env: { ...process.env, ...portableEnv(this.baseDir) },
         stdio: ['ignore', 'pipe', 'pipe'], // cùng lý do như trong run()
       });
       let stdout = '';

@@ -16,16 +16,18 @@ const avatar = require('./avatar');
 const { BrainSidecar } = require('./brain/sidecar');
 const { Scheduler } = require('./scheduler');
 const { Updater } = require('./updater');
+const registryModule = require('./registry');
 
 let win = null;
-let store = null;
+let store = null;      // chat db của Alice ĐANG MỞ
 let memory = null;
 let engine = null;
-let brain = null;
+let brain = null;      // brain của Alice ĐANG MỞ
 let runTurn = null;
 let settings = null;
 let busy = false;
-let scheduler = null;
+let scheduler = null;  // lịch hẹn của Alice ĐANG MỞ (bảng lịch nằm trong chat db)
+let registry = { active: null, alices: [] };
 
 // Cửa sổ đóng (bấm X) chỉ ẨN app — chat app phải sống tiếp để nhận lịch hẹn và
 // không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
@@ -112,18 +114,13 @@ function createWindow() {
   });
 }
 
-async function boot() {
-  log.info(`boot: root=${config.ROOT}`);
-  settings = config.loadSettings();
-  fs.mkdirSync(config.DATA_DIR, { recursive: true });
+function currentAlice() {
+  return registry.alices.find((a) => a.id === registry.active) || null;
+}
 
-  store = new Store(config.dbPath());
-  engine = new OpencodeEngine(settings);
-  log.info(`boot: engine=${engine.binSource} ${engine.binPath || '(missing)'}`);
-
-  // Nén bằng chính model đang dùng. Hỏng thì `Memory` tự rơi về nén cơ học —
-  // thà tóm tắt thô còn hơn xoay session với mồi rỗng.
-  memory = new Memory(store, settings, async (messages) => {
+/** Nén bằng chính model đang dùng — dùng chung cho mọi Alice. */
+function makeSummarizer() {
+  return async (messages) => {
     const transcript = messages
       .map((m) => `[${m.role === 'alice' ? 'Alice' : 'Bệ hạ'}]: ${m.text}`)
       .join('\n');
@@ -141,63 +138,165 @@ async function boot() {
     } catch {
       return null; // → Memory dùng defaultSummarize
     }
-  });
+  };
+}
 
-  const brainMcp = await startBrain();
+/**
+ * Mở một Alice: teardown bản đang chạy (nếu có), dựng lại TOÀN BỘ tầng dữ liệu
+ * của Alice đó — chat db, brain, auth, lịch hẹn. Mỗi Alice hoàn toàn độc lập.
+ */
+async function activateAlice(id) {
+  const alice = registry.alices.find((a) => a.id === id);
+  if (!alice) throw new Error('Không tìm thấy Alice.');
+
+  // Teardown bản cũ.
+  if (scheduler) scheduler.stop();
+  if (brain) brain.stop();
+  if (store) { store.close(); store = null; }
+  scheduler = null;
+  brain = null;
+  memory = null;
+  runTurn = null;
+
+  registry.active = id;
+  registryModule.save(registry);
+
+  const base = config.aliceDir(id);
+  engine.setBaseDir(base);
+
+  store = new Store(path.join(base, 'chat.db'));
+  memory = new Memory(store, settings, makeSummarizer());
+
+  brain = new BrainSidecar(settings.brain || {}, { dataDir: path.join(base, 'brain') });
+  if (brain.available) {
+    try {
+      // Lần đầu: dựng brain RỖNG (schema tự tạo). Alice bắt đầu không tri thức.
+      brain.ensureSchema();
+    } catch (err) {
+      log.error(`brain.ensureSchema: ${err.message}`);
+      if (win) win.webContents.send('alice:brain-error', `Không dựng được trí nhớ: ${err.message}`);
+    }
+  }
+
+  const brainMcp = brain && brain.available ? brain.mcpConfig() : null;
   const workDir = provisionWorkspace(settings, { brainMcp });
 
   runTurn = createTurnRunner({ store, memory, engine, workDir, settings });
   scheduler = new Scheduler({ store, runTurn, log });
   scheduler.start();
+
+  log.info(`alice active: ${alice.id} (${alice.name})`);
+  if (win) {
+    win.webContents.send('alice:alice-changed', {
+      id: alice.id,
+      name: alice.name,
+      alices: registry.alices,
+      active: registry.active,
+      auth: auth.authStatus(base),
+    });
+  }
+  return alice;
 }
 
-async function startBrain() {
-  if (!settings.brain || settings.brain.enabled === false) return null;
-  brain = new BrainSidecar(settings.brain);
-  if (!brain.available) return null;
+async function boot() {
+  log.info(`boot: root=${config.ROOT}`);
+  settings = config.loadSettings();
+  fs.mkdirSync(config.DATA_DIR, { recursive: true });
 
-  // Lần đầu chạy: dựng brain RỖNG. Alice bắt đầu không có tri thức nào và tự đắp
-  // dần — bộ cài không mang tri thức của ai theo.
-  try {
-    if (win) win.webContents.send('alice:busy', 'Lần đầu chạy — Alice đang dọn chỗ để nhớ, chờ chút nhé…');
-    brain.ensureSchema();
-    if (win) win.webContents.send('alice:busy', null);
-  } catch (err) {
-    log.error(`brain.ensureSchema: ${err.message}`);
-    if (win) win.webContents.send('alice:busy', null);
-    if (win) win.webContents.send('alice:brain-error', `Không dựng được trí nhớ: ${err.message}`);
-  }
+  engine = new OpencodeEngine(settings);
+  log.info(`boot: engine=${engine.binSource} ${engine.binPath || '(missing)'}`);
 
-  try {
-    await brain.start();
-    log.info(`brain: sidecar started on ${brain.settings.host || '127.0.0.1'}:${brain.settings.port || 8931}`);
-    return brain.mcpConfig();
-  } catch (err) {
-    // Brain hỏng KHÔNG được làm chết app — nhưng phải nói ra, không im lặng chạy
-    // tiếp với recall kém đi (D-0053 mục 2 cấm giảm năng lực recall trong im lặng).
-    log.error(`brain: start failed: ${err.message}`);
-    if (win) win.webContents.send('alice:brain-error', String(err.message || err));
-    return null;
+  registry = registryModule.load();
+  if (!registry.alices.length) {
+    // Lần đầu lên bản đa-Alice mà máy đang có dữ liệu cũ → gom thành Alice đầu tiên.
+    const migrated = registryModule.migrateLegacy({ name: config.appName() });
+    if (migrated) {
+      registry = migrated;
+      log.info(`migrated legacy data → Alice ${registry.active}`);
+    }
   }
+  if (registry.active) {
+    await activateAlice(registry.active);
+  }
+  // Chưa có Alice nào → renderer mở màn hình tạo Alice đầu tiên.
 }
 
 // ── IPC ────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('alice:status', async () => {
   await bootPromise;
+  const base = registry.active ? config.aliceDir(registry.active) : null;
   return {
     root: config.ROOT,
     dataDir: config.DATA_DIR,
     appName: config.appName(),
+    alices: registry.alices,
+    active: registry.active,
+    activeName: (currentAlice() || {}).name || null,
     engine: { path: engine.binPath, source: engine.binSource, available: engine.available },
     // Chỉ tên provider — không bao giờ kèm giá trị key (D-0004).
-    auth: auth.authStatus(),
+    auth: base ? auth.authStatus(base) : { configured: false, providers: [] },
     brain: brain ? brain.status() : { enabled: false },
     settings,
-    conversation: store.currentConversation(),
-    messageCount: store.count(),
+    conversation: store ? store.currentConversation() : null,
+    messageCount: store ? store.count() : 0,
     update: updater.status(),
   };
+});
+
+// ── các Alice ──────────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:alice:list', async () => {
+  await bootPromise;
+  return { alices: registry.alices, active: registry.active };
+});
+
+ipcMain.handle('alice:alice:create', async (_e, { name, key }) => {
+  await bootPromise;
+  const nameT = String(name || '').trim();
+  const keyT = String(key || '').trim();
+  if (!nameT) return { error: 'Nhập tên cho Alice.' };
+  if (!keyT) return { error: 'Alice cần một chìa khoá riêng.' };
+  const { state, alice } = registryModule.create({ name: nameT, key: keyT });
+  registry = state;
+  log.info(`alice created: ${alice.id} (${alice.name})`);
+  try {
+    await activateAlice(alice.id);
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+  return { alice };
+});
+
+ipcMain.handle('alice:alice:select', async (_e, id) => {
+  await bootPromise;
+  try {
+    await activateAlice(id);
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('alice:alice:remove', async (_e, id) => {
+  await bootPromise;
+  const { state, removed } = registryModule.remove(id);
+  registry = state;
+  if (!removed) return { error: 'Không tìm thấy Alice.' };
+  log.info(`alice removed: ${id}`);
+  if (registry.active) {
+    await activateAlice(registry.active);
+  } else {
+    // Xoá Alice cuối cùng → teardown hết, renderer mở màn hình tạo Alice mới.
+    if (scheduler) scheduler.stop();
+    if (brain) brain.stop();
+    if (store) { store.close(); store = null; }
+    scheduler = null;
+    brain = null;
+    runTurn = null;
+    if (win) win.webContents.send('alice:alice-changed', { id: null, alices: [], active: null });
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('alice:avatar:get', async () => ({
@@ -223,14 +322,16 @@ ipcMain.handle('alice:avatar:reset', async () => ({ uri: avatar.reset(), custom:
 
 ipcMain.handle('alice:auth:set', async (_e, { provider, key }) => {
   if (!provider || !key) return { error: 'Thiếu provider hoặc key.' };
+  const base = registry.active ? config.aliceDir(registry.active) : null;
+  if (!base) return { error: 'Chưa có Alice nào.' };
   try {
-    return auth.setApiKey(provider, key);
+    return auth.setApiKey(provider, key, base);
   } catch (err) {
     return { error: String(err.message || err) };
   }
 });
 
-// ── chẩn đoán (D-xxxx: khách bấm một nút là thấy log lỗi và transcript) ─────
+// ── chẩn đoán ──────────────────────────────────────────────────────────────
 
 ipcMain.handle('alice:debug:log', async () => ({
   file: log.LOG_FILE,
@@ -241,7 +342,7 @@ ipcMain.handle('alice:debug:open', async () => shell.openPath(log.LOG_DIR));
 
 ipcMain.handle('alice:debug:transcript', async (_e, limit = 30) => {
   await bootPromise;
-  const conv = store.currentConversation();
+  const conv = store ? store.currentConversation() : null;
   if (!conv) return [];
   return store.recent(conv.id, limit).map((m) => ({
     id: m.id, role: m.role, text: m.text, ts: m.ts,
@@ -255,7 +356,7 @@ ipcMain.handle('alice:debug:transcript', async (_e, limit = 30) => {
 
 ipcMain.handle('alice:history', async (_e, limit = 80) => {
   await bootPromise;
-  const conv = store.currentConversation();
+  const conv = store ? store.currentConversation() : null;
   if (!conv) return [];
   return store.recent(conv.id, limit).map((m) => ({
     id: m.id, role: m.role, text: m.text, ts: m.ts,
@@ -264,6 +365,7 @@ ipcMain.handle('alice:history', async (_e, limit = 80) => {
 
 ipcMain.handle('alice:search', async (_e, query) => {
   await bootPromise;
+  if (!store) return [];
   return store.search(query, 20).map((m) => ({ id: m.id, role: m.role, text: m.text, ts: m.ts }));
 });
 
@@ -290,7 +392,7 @@ ipcMain.handle('alice:update:open', async (_e, url) => {
 
 ipcMain.handle('alice:chat:clear', async () => {
   await bootPromise;
-  const conv = store.currentConversation();
+  const conv = store ? store.currentConversation() : null;
   if (conv) {
     log.info(`clear chat: conversation ${conv.id} — ${store.count(conv.id)} messages`);
     store.clearConversation(conv.id);
@@ -298,15 +400,16 @@ ipcMain.handle('alice:chat:clear', async () => {
   return { ok: true };
 });
 
-// ── lịch hẹn ───────────────────────────────────────────────────────────────
+// ── lịch hẹn (của Alice đang mở) ───────────────────────────────────────────
 
 ipcMain.handle('alice:sched:list', async () => {
   await bootPromise;
-  return store.listSchedules();
+  return store ? store.listSchedules() : [];
 });
 
 ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
   await bootPromise;
+  if (!store) return { error: 'Chưa có Alice nào.' };
   const h = Number(hour);
   const m = Number(minute);
   if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
@@ -321,6 +424,7 @@ ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
 
 ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
   await bootPromise;
+  if (!store) return { error: 'Chưa có Alice nào.' };
   if (patch.task !== undefined) patch.task = String(patch.task || '').trim();
   if (patch.task === '') return { error: 'Việc cần làm không được để trống.' };
   const sched = store.updateSchedule(Number(id), patch);
@@ -330,6 +434,7 @@ ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
 
 ipcMain.handle('alice:sched:remove', async (_e, id) => {
   await bootPromise;
+  if (!store) return { error: 'Chưa có Alice nào.' };
   store.removeSchedule(Number(id));
   return { ok: true };
 });
@@ -354,13 +459,14 @@ ipcMain.handle('alice:settings:get', async () => settings);
 ipcMain.handle('alice:settings:set', async (_e, patch) => {
   settings = config.saveSettings({ ...settings, ...patch });
   engine.settings = settings;
-  memory.settings = settings;
-  provisionWorkspace(settings, { brainMcp: brain ? brain.mcpConfig() : null });
+  if (memory) memory.settings = settings;
+  provisionWorkspace(settings, { brainMcp: brain && brain.available ? brain.mcpConfig() : null });
   return settings;
 });
 
 ipcMain.handle('alice:send', async (event, text) => {
   await bootPromise;
+  if (!runTurn) return { error: 'Chưa có Alice nào. Tạo Alice trước đã.' };
   if (busy) return { error: 'Đang bận một lượt khác — chờ em trả lời xong đã ạ.' };
   if (!engine.available) {
     return { error: 'Chưa có binary opencode. Đặt vào runtime/opencode/ hoặc cài opencode trên máy.' };
@@ -375,6 +481,7 @@ ipcMain.handle('alice:send', async (event, text) => {
     // session nào, có xoay không. Không bao giờ kèm nội dung tin hay secret.
     log.info([
       'turn ok',
+      `alice=${registry.active || '-'}`,
       `model=${res.model || '-'}`,
       res.attempts && res.attempts.length ? `failed=${res.attempts.map((a) => `${a.model}(${a.error.slice(0, 120)})`).join('|')}` : null,
       `session=${res.engineSession || '-'}`,
@@ -394,8 +501,8 @@ ipcMain.handle('alice:cancel', async () => engine.cancel());
 
 // ── vòng đời ───────────────────────────────────────────────────────────────
 
-// Một máy có thể chạy nhiều Alice ở các thư mục khác nhau — nhưng cùng một thư
-// mục thì chỉ một tiến trình. Mở exe lần nữa khi app đang ẩn = hiện cửa sổ lên.
+// Một máy có thể chạy nhiều app Alice ở các thư mục khác nhau — nhưng cùng một
+// thư mục thì chỉ một tiến trình. Mở exe lần nữa khi app đang ẩn = hiện cửa sổ lên.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {

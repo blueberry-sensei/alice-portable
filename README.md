@@ -70,8 +70,8 @@ lập trình.*
 
 ## Mở Alice lần đầu
 
-Cài xong, mở Alice từ Desktop hoặc Start Menu. Alice hiện màn hình chào, xin một
-**chìa khoá (API key)**:
+Cài xong, mở Alice từ Desktop hoặc Start Menu. Alice hỏi **tên và chìa khoá (API key)**
+để tạo Alice đầu tiên:
 
 ![Màn hình chào lần đầu](docs/screenshot-welcome.png)
 
@@ -89,9 +89,21 @@ Chìa khoá là thứ cho phép Alice gọi được model AI. Lấy như sau:
 
 **Bước 3.** Trong trang tài khoản, copy dòng **API key**.
 
-**Bước 4.** Quay lại Alice, dán vào ô, bấm **Bắt đầu**.
+**Bước 4.** Quay lại Alice, đặt tên cho Alice của bạn (ví dụ *Alice GoDine*), dán
+chìa khoá vào, bấm **Tạo**.
 
 **Chỉ làm một lần.** Lần sau mở là chat được ngay.
+
+## Nhiều Alice trong một app
+
+Một app Alice có thể chứa **nhiều Alice** — ví dụ *Alice GoDine* cho quán ăn,
+*Alice PHUONG* cho việc riêng. Mỗi Alice có:
+
+- **tên riêng** — đổi bằng ô chọn trên cùng bên trái (＋ để tạo thêm);
+- **chìa khoá riêng** — mỗi Alice dùng key của nó, không dùng chung;
+- **trí nhớ riêng** — lịch sử chat, brain và lịch hẹn của Alice này không lẫn
+  với Alice khác;
+- **xoá được** — trong ⚙ → *Các Alice* → Xoá (mất hết dữ liệu của Alice đó).
 
 ## Chat
 

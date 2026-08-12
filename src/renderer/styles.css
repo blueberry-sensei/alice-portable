@@ -122,6 +122,16 @@ body {
 .head .who { flex: 1; min-width: 0; }
 .head .name { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 17px; }
 .head .name .star { color: var(--primary); font-size: 14px; }
+.head .name .alice-switch {
+  max-width: 260px;
+  background: transparent; border: none; outline: none;
+  color: var(--text); font-family: 'Baloo 2', cursive;
+  font-weight: 800; font-size: 17px; cursor: pointer;
+  text-overflow: ellipsis;
+}
+.head .name .alice-switch:hover { color: var(--primary); }
+.head .name .alice-switch option { background: var(--surface); color: var(--text); font-family: 'Nunito', sans-serif; }
+.head .name .add-alice { width: 26px; height: 26px; font-size: 14px; border-radius: 9px; }
 .head .sub {
   font-size: 12px; color: var(--muted);
   font-family: 'JetBrains Mono', monospace;
