@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('alice', {
 
   onStream: (cb) => ipcRenderer.on('alice:stream', (_e, payload) => cb(payload)),
   onReady: (cb) => ipcRenderer.on('alice:ready', () => cb()),
+  onBusy: (cb) => ipcRenderer.on('alice:busy', (_e, msg) => cb(msg)),
   onBrainError: (cb) => ipcRenderer.on('alice:brain-error', (_e, msg) => cb(msg)),
   onFatal: (cb) => ipcRenderer.on('alice:fatal', (_e, msg) => cb(msg)),
 });

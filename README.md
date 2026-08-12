@@ -5,6 +5,22 @@ cài đặt gì thêm, không cần Docker, không cần tài khoản Claude.
 
 ![Alice đang chat](docs/screenshot-chat.png)
 
+## Cài Alice
+
+Mở **PowerShell**, dán dòng này, Enter:
+
+```
+irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.ps1 | iex
+```
+
+Nó tải bộ cài về rồi mở lên. Bấm theo bộ cài là xong.
+
+Không thích gõ lệnh? Vào **[trang Releases](https://github.com/blueberry-sensei/alice-portable/releases/latest)**,
+tải file `Alice-Setup-….exe`, bấm đúp.
+
+> Windows hiện bảng xanh *"Windows protected your PC"*? Bấm **More info** → **Run
+> anyway**. Bảng đó hiện vì app chưa mua chữ ký số, không phải vì có virus.
+
 ---
 
 ## Vừa build xong trên máy này? Chạy luôn
@@ -37,21 +53,29 @@ lập trình.*
 
 ## Mở Alice lần đầu
 
-**Bước 1.** Giải nén thư mục `Alice` ra chỗ nào bạn thích — Desktop, ổ D, USB, đều được.
-
-**Bước 2.** Mở thư mục đó, bấm đúp vào **`Alice.exe`**.
-
-> Windows hiện bảng xanh *"Windows protected your PC"*? Bấm **More info** → **Run
-> anyway**. Bảng đó hiện vì app chưa mua chữ ký số, không phải vì có virus.
-
-**Bước 3.** Alice hiện màn hình chào, xin một **chìa khoá (API key)**:
+Cài xong, mở Alice từ Desktop hoặc Start Menu. Alice hiện màn hình chào, xin một
+**chìa khoá (API key)**:
 
 ![Màn hình chào lần đầu](docs/screenshot-welcome.png)
 
-- Chưa có chìa khoá? Vào <https://opencode.ai/auth>, đăng nhập, copy dòng **API key**,
-  rồi dán vào ô đó và bấm **Bắt đầu**.
-- Máy bạn đã cài sẵn opencode? Bấm nút **"Máy này đã cài opencode — dùng luôn chìa
-  khoá đó"** là xong, khỏi dán.
+Chìa khoá là thứ cho phép Alice gọi được model AI. Lấy như sau:
+
+**Bước 1.** Mở <https://opencode.ai/auth> và đăng ký tài khoản.
+
+**Bước 2.** Nhập thông tin thanh toán.
+
+> Nghe hơi kỳ khi mình định dùng model miễn phí, nhưng OpenCode bắt buộc bước này
+> cho mọi tài khoản. Có nhiều model **miễn phí thật** — dùng chúng thì không bị trừ
+> tiền. Chỉ khi bạn tự chọn model trả phí trong Cài đặt mới phát sinh chi phí.
+>
+> Không muốn đưa thẻ? Nói với người đưa app cho bạn — họ đưa chìa khoá của họ được.
+
+**Bước 3.** Trong trang tài khoản, copy dòng **API key**.
+
+**Bước 4.** Quay lại Alice, dán vào ô, bấm **Bắt đầu**.
+
+*(Nếu máy bạn tình cờ đã cài sẵn opencode, Alice hiện thêm nút **"Máy này đã cài
+opencode — dùng luôn chìa khoá đó"** — bấm là xong, khỏi làm bốn bước trên.)*
 
 **Chỉ làm một lần.** Lần sau mở là chat được ngay.
 
@@ -75,20 +99,23 @@ Muốn quay lại ảnh cũ thì bấm **Về ảnh mặc định**.
 
 Ảnh của bạn lưu ngay cạnh app nên **cập nhật không mất**.
 
-## Mang Alice đi máy khác
-
-Copy **cả thư mục** `Alice` sang USB rồi cắm vào máy khác. Lịch sử chat, ảnh, chìa
-khoá, tất cả đi theo. Không cần cài lại gì.
-
 ## Cập nhật
 
-Người đưa app cho bạn sẽ gửi thư mục mới. Khi thay:
+Chạy lại đúng lệnh lúc cài:
 
-1. Đổi tên thư mục cũ thành `Alice-cu` (đừng xoá vội).
-2. Giải nén thư mục mới ra.
-3. Copy thư mục **`alice-data`** từ `Alice-cu` sang đè vào thư mục mới → giữ nguyên
-   lịch sử chat và chìa khoá.
-4. Chạy thử. Ổn rồi mới xoá `Alice-cu`.
+```
+irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.ps1 | iex
+```
+
+Nó tải bản mới nhất và cài đè. **Lịch sử chat, ảnh và chìa khoá của bạn giữ nguyên** —
+chúng nằm ở chỗ khác, bộ cài không đụng vào.
+
+## Gỡ Alice
+
+Windows → **Settings → Apps** → tìm **Alice** → **Uninstall**.
+
+Gỡ app **không xoá** lịch sử chat. Muốn xoá sạch, xoá thêm thư mục `alice-data` trong
+nơi bạn đã cài Alice.
 
 ## Có gì không ổn?
 
@@ -157,15 +184,39 @@ set ALICE_BRAIN_CONTAINER=ten-container-brain-cua-ban
 Không chạy `import:brain-data` thì brain lên được nhưng database chưa cả schema, và
 mọi truy vấn chết ở `no such table: sources` — có vỏ mà không có tri thức.
 
-## Vì sao không có link tải sẵn
+`npm run build` ra hai thứ trong `dist\`:
 
-Bản đầy đủ nặng **~1,9 GB** (runtime Python + binary opencode + tri thức), và phần
-tri thức là dữ liệu **riêng của mỗi người** — không phải thứ đem phát chung. Nên
-đường đi là: bạn build một lần với brain của bạn, rồi đưa thư mục kết quả cho người
-dùng của bạn.
+| Cái nào | Cho ai |
+|---|---|
+| `Alice-Setup-<ver>.exe` | **Người dùng cuối** — bấm đúp là cài. Đây là thứ upload lên Releases |
+| `win-unpacked\` | Ai muốn bản mang đi được (USB), hoặc không có quyền cài |
 
-`npm run build` cố ý **không** chép `alice.db` (lịch sử chat), **không** chép API key,
-**không** chép `.secret_key` vào bản phát.
+Bộ cài cố ý **không** chứa `alice.db` (lịch sử chat), **không** chứa API key,
+**không** chứa `.secret_key`. Tri thức thì có — nó đi kèm dưới dạng bản *seed* trong
+`runtime\brain-seed\`, và app tự bung sang `alice-data\brain\` ở lần chạy đầu (bung
+tại chỗ thì mỗi lần cập nhật sẽ xoá mất những gì brain học thêm).
+
+## Phát hành cho khách
+
+```bash
+npm run build
+```
+
+```bash
+set GITHUB_TOKEN=token-cua-ban
+```
+
+```bash
+npm run release
+```
+
+Script tạo release, upload bộ cài, rồi in ra đúng dòng lệnh để đưa khách. Token tạo ở
+<https://github.com/settings/tokens> với quyền **contents: write** — script không lưu
+và không in nó ra đâu cả.
+
+⚠️ GitHub chặn asset **> 2 GB**. Script kiểm trước khi upload để không tốn một tiếng
+rồi mới bị từ chối. Chạm trần thì tỉa `runtime\brain` hoặc tách tri thức thành bản
+tải riêng.
 
 ## Alice của bạn, không phải Alice của tôi
 

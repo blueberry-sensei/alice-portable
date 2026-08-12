@@ -34,15 +34,37 @@ extraResources:
       - '!**/test/**'
 
 win:
-  # `dir` là target THẬT SỰ dùng được cho bản này: brain nhúng gần 900MB, mà target
-  # `portable` gói tất cả vào một .exe tự giải nén — mỗi lần chạy là một lần bung
-  # gần 1GB ra %TEMP%. Một thư mục mang đi được thì vừa portable vừa mở là chạy.
+  # Hai target, hai đối tượng:
+  #
+  #   `nsis` — bộ cài `Alice-Setup-<ver>.exe` cho người dùng cuối. Người không rành
+  #     kỹ thuật không nên phải "giải nén thư mục rồi tìm file exe"; họ cần một file
+  #     bấm đúp, bấm Next, xong.
+  #   `dir`  — thư mục mang đi được, cho ai muốn cắm USB hoặc không có quyền cài.
+  #
+  # Cố ý KHÔNG dùng target `portable` (một .exe tự giải nén): brain nhúng gần 900MB,
+  # mỗi lần chạy là một lần bung hơn 1GB ra %TEMP%.
   target:
+    - nsis
     - dir
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: ${productName}-Setup-${version}.${ext}
 
-# Nén `store`: nhanh hơn nhiều lúc build, và phần nặng nhất (wheel Python) vốn đã
-# là dữ liệu nén sẵn nên nén lại gần như không giảm được bao nhiêu.
-compression: store
+nsis:
+  # `oneClick: false` + cho chọn thư mục cài — `D-0054` mục 1: installer hỏi nơi cài,
+  # có sẵn mặc định, không cài chui vào một chỗ cố định.
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false          # cài cho user hiện tại → không cần quyền Administrator
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false   # gỡ app KHÔNG xoá lịch sử chat của người dùng
+  installerLanguages:
+    - vi_VN
+    - en_US
+
+# Nén `maximum`: bộ cài là thứ KHÁCH TẢI VỀ, nên đổi thời gian build (của mình, một
+# lần) lấy dung lượng tải (của khách, mỗi người một lần). Cũng là điều kiện để lọt
+# giới hạn 2GB/file của GitHub Release.
+compression: maximum
 
 publish: null

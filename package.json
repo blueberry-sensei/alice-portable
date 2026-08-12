@@ -10,6 +10,8 @@
     "start": "electron .",
     "test": "powershell -ExecutionPolicy Bypass -File scripts/run-tests.ps1",
     "build": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
+    "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/make-shortcut.ps1",
     "bundle:opencode": "powershell -ExecutionPolicy Bypass -File scripts/bundle-opencode.ps1",
     "bundle:brain": "powershell -ExecutionPolicy Bypass -File scripts/bundle-brain.ps1",
     "import:brain-data": "powershell -ExecutionPolicy Bypass -File scripts/import-brain-data.ps1",

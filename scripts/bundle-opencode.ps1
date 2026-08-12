@@ -6,12 +6,15 @@
 #
 # Đã kiểm: `opencode.exe` là binary ĐỘC LẬP (~167 MB). Copy một mình nó sang thư mục
 # trống rồi chạy `--version` vẫn ra — không cần `node_modules` bên cạnh.
-$ErrorActionPreference = 'Stop'
 
+# `param()` PHẢI là câu lệnh đầu tiên của script (chú thích thì không tính). Đặt sau
+# một phép gán là script chết lúc chạy, dù parser tĩnh không kêu gì.
 param(
   # Đường dẫn tới opencode.exe. Không có thì tự dò.
   [string]$Source = $(if ($env:ALICE_OPENCODE_EXE) { $env:ALICE_OPENCODE_EXE } else { '' })
 )
+
+$ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $dst  = Join-Path $root 'runtime\opencode'

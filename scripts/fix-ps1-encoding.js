@@ -11,13 +11,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const dir = __dirname;
+// Quét cả `scripts/` lẫn gốc repo: `install.ps1` nằm ở gốc (để đường dẫn raw ngắn
+// cho khách dán), và nó cũng vỡ y hệt nếu thiếu BOM.
+const dirs = [__dirname, path.resolve(__dirname, '..')];
 const BOM = '﻿';
 let fixed = 0;
 
-for (const name of fs.readdirSync(dir)) {
-  if (!name.endsWith('.ps1')) continue;
-  const p = path.join(dir, name);
+const files = dirs.flatMap((d) =>
+  fs.readdirSync(d).filter((n) => n.endsWith('.ps1')).map((n) => path.join(d, n)));
+
+for (const p of files) {
+  const name = path.relative(path.resolve(__dirname, '..'), p);
   const text = fs.readFileSync(p, 'utf8');
   if (text.startsWith(BOM)) continue;
   fs.writeFileSync(p, BOM + text, 'utf8');

@@ -129,6 +129,20 @@ async function startBrain() {
   if (!settings.brain || settings.brain.enabled === false) return null;
   brain = new BrainSidecar(settings.brain);
   if (!brain.available) return null;
+
+  // Lần đầu chạy sau khi cài: bung tri thức từ bản seed trong bộ cài. Vài trăm MB
+  // nên phải nói ra — im lặng vài chục giây ở lần mở đầu tiên thì người dùng tưởng
+  // app hỏng và tắt đi giữa chừng.
+  try {
+    if (win) win.webContents.send('alice:busy', 'Lần đầu chạy — Alice đang dọn trí nhớ vào máy, chờ chút nhé…');
+    const r = brain.seedData();
+    if (win) win.webContents.send('alice:busy', null);
+    if (r.seeded) console.log(`[brain] đã bung ${r.files} file tri thức`);
+  } catch (err) {
+    if (win) win.webContents.send('alice:busy', null);
+    if (win) win.webContents.send('alice:brain-error', `Không bung được tri thức: ${err.message}`);
+  }
+
   try {
     await brain.start();
     return brain.mcpConfig();

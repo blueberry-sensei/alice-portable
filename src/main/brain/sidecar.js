@@ -40,6 +40,32 @@ class BrainSidecar {
   }
 
   /**
+   * Bung tri thức lần đầu chạy.
+   *
+   * Bộ cài mang theo một bản **seed** ở `runtime/brain-seed/` (chỉ đọc, nằm trong
+   * thư mục chương trình). Lần đầu chạy, app chép nó sang `alice-data/brain/` rồi
+   * từ đó brain ghi vào bản của người dùng.
+   *
+   * Vì sao không dùng thẳng bản seed: brain có ghi (index, telemetry, ingest), mà
+   * thư mục chương trình sẽ bị **ghi đè khi cập nhật** — dùng tại chỗ là mỗi lần
+   * cập nhật lại mất sạch những gì brain đã học thêm.
+   *
+   * Trả `{ seeded, files }`. Chép vài trăm MB nên người gọi phải báo cho người dùng
+   * biết là đang bận, không thì app trông như treo ở lần mở đầu tiên.
+   */
+  seedData() {
+    const seed = path.join(config.RESOURCES_DIR, 'brain-seed');
+    const target = this.dataDir;
+    if (!fs.existsSync(seed)) return { seeded: false, reason: 'no-seed' };
+    if (fs.existsSync(path.join(target, 'sag.db'))) return { seeded: false, reason: 'already' };
+
+    fs.mkdirSync(target, { recursive: true });
+    fs.cpSync(seed, target, { recursive: true });
+    const files = countFiles(target);
+    return { seeded: true, files };
+  }
+
+  /**
    * Khoá mã hoá credential provider trong bảng settings của brain (`core/crypto.py`
    * dùng AES-GCM). Sinh một lần rồi giữ nguyên: đổi khoá là mọi credential đã lưu
    * thành rác không giải được.
@@ -165,6 +191,14 @@ class BrainSidecar {
       lastError: this.lastError,
     };
   }
+}
+
+function countFiles(dir) {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    if (e.isFile()) n += 1;
+  }
+  return n;
 }
 
 module.exports = { BrainSidecar };
