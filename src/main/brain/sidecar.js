@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const config = require('../config');
 
@@ -25,12 +25,19 @@ const config = require('../config');
  * `sag_api.desktop` (uvicorn) chỉ bật khi cần HTTP API cho ingest/sync.
  */
 class BrainSidecar {
-  constructor(brainSettings) {
+  /**
+   * @param {object} brainSettings
+   * @param {object} [paths]  ghi đè đường dẫn — để test dựng được một "máy vừa cài"
+   *   riêng mà KHÔNG phải sửa biến môi trường toàn tiến trình. Bản đầu của test làm
+   *   thế và nó làm mù luôn các test brain khác chạy cùng lượt: 0 fail nhưng 2 skip,
+   *   nhìn qua tưởng vẫn xanh.
+   */
+  constructor(brainSettings, paths = {}) {
     this.settings = brainSettings || {};
-    this.runtimeDir = path.join(config.RESOURCES_DIR, 'brain');
+    this.runtimeDir = paths.runtimeDir || path.join(config.RESOURCES_DIR, 'brain');
     this.pythonPath = path.join(this.runtimeDir, 'python', 'python.exe');
     this.appDir = path.join(this.runtimeDir, 'app');
-    this.dataDir = path.join(config.DATA_DIR, 'brain');
+    this.dataDir = paths.dataDir || path.join(config.DATA_DIR, 'brain');
     this.proc = null;
     this.lastError = null;
   }
@@ -40,29 +47,37 @@ class BrainSidecar {
   }
 
   /**
-   * Bung tri thức lần đầu chạy.
+   * Dựng brain RỖNG cho lần chạy đầu.
    *
-   * Bộ cài mang theo một bản **seed** ở `runtime/brain-seed/` (chỉ đọc, nằm trong
-   * thư mục chương trình). Lần đầu chạy, app chép nó sang `alice-data/brain/` rồi
-   * từ đó brain ghi vào bản của người dùng.
+   * Alice khởi đầu **không có tri thức nào** và tự đắp dần khi làm việc — đó là cách
+   * ALICE CODING (github.com/blueberry-sensei/alice-coding) hoạt động. Bộ cài KHÔNG
+   * mang theo tri thức của ai cả:
    *
-   * Vì sao không dùng thẳng bản seed: brain có ghi (index, telemetry, ingest), mà
-   * thư mục chương trình sẽ bị **ghi đè khi cập nhật** — dùng tại chỗ là mỗi lần
-   * cập nhật lại mất sạch những gì brain đã học thêm.
+   *   - Tri thức của một project là dữ liệu **của người đó**. Nhét brain của project
+   *     A vào bộ cài phát cho người B là phát tán dữ liệu nhầm chỗ — bản đầu của
+   *     script build đã làm đúng lỗi này, 546MB nhật ký quyết định của một khách
+   *     hàng suýt đi vào một repo public.
+   *   - Bỏ nó ra thì bộ cài từ ~1,9GB xuống ~350MB, lọt trần 2GB của GitHub Release,
+   *     và CI dựng được cho cả ba hệ điều hành.
    *
-   * Trả `{ seeded, files }`. Chép vài trăm MB nên người gọi phải báo cho người dùng
-   * biết là đang bận, không thì app trông như treo ở lần mở đầu tiên.
+   * Schema tự tạo được: `sag_api.core.db.init_db()` gọi `Base.metadata.create_all`.
+   * Không cần alembic, không cần ship file `.db` dựng sẵn.
+   *
+   * Trả `{ created }`. Mất vài giây (nạp sqlalchemy + lancedb) nên người gọi nên
+   * báo cho người dùng biết là đang bận.
    */
-  seedData() {
-    const seed = path.join(config.RESOURCES_DIR, 'brain-seed');
-    const target = this.dataDir;
-    if (!fs.existsSync(seed)) return { seeded: false, reason: 'no-seed' };
-    if (fs.existsSync(path.join(target, 'sag.db'))) return { seeded: false, reason: 'already' };
+  ensureSchema() {
+    if (fs.existsSync(path.join(this.dataDir, 'sag.db'))) return { created: false, reason: 'already' };
 
-    fs.mkdirSync(target, { recursive: true });
-    fs.cpSync(seed, target, { recursive: true });
-    const files = countFiles(target);
-    return { seeded: true, files };
+    const res = spawnSync(
+      this.pythonPath,
+      ['-c', 'import asyncio; from sag_api.core.db import init_db; asyncio.run(init_db())'],
+      { cwd: this.appDir, windowsHide: true, env: { ...process.env, ...this.env() }, encoding: 'utf8' }
+    );
+    if (res.status !== 0) {
+      throw new Error(`Không dựng được brain rỗng: ${String(res.stderr || '').trim().slice(-500)}`);
+    }
+    return { created: true };
   }
 
   /**
@@ -191,14 +206,6 @@ class BrainSidecar {
       lastError: this.lastError,
     };
   }
-}
-
-function countFiles(dir) {
-  let n = 0;
-  for (const e of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (e.isFile()) n += 1;
-  }
-  return n;
 }
 
 module.exports = { BrainSidecar };

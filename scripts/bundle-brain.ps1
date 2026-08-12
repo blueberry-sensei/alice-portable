@@ -11,9 +11,8 @@
 #     đúng tinh thần portable.
 #
 # Chạy được nhiều lần; bước nào xong rồi thì bỏ qua.
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
 
+# `param()` PHẢI đứng trước mọi câu lệnh (chú thích không tính).
 param(
   # Tên container brain đang chạy. KHÔNG ghi cứng: mỗi người dựng brain của mình với
   # một tên khác, và một script chỉ chạy được trên đúng một máy thì vô dụng với
@@ -22,6 +21,9 @@ param(
   #   hoặc: .\bundle-brain.ps1 -Container ten-container-cua-ban
   [string]$Container = $(if ($env:ALICE_BRAIN_CONTAINER) { $env:ALICE_BRAIN_CONTAINER } else { '' })
 )
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 $root      = Split-Path -Parent $PSScriptRoot
 $runtime   = Join-Path $root 'runtime\brain'

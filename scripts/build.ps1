@@ -20,27 +20,18 @@ if (-not (Test-Path $builder)) { throw "Chưa cài electron-builder: $builder" }
 $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
 $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
 
-# ── Dựng bản seed tri thức TRƯỚC khi đóng gói ──────────────────────────────
-# Bộ cài NSIS đóng từ những gì electron-builder biết, nên tri thức phải nằm trong
-# `runtime/` (đi vào extraResources) từ trước. Chép sau khi build thì chỉ thư mục
-# `win-unpacked` có, còn người cài bằng bộ cài sẽ nhận một brain rỗng.
-$srcBrain  = Join-Path $root 'alice-data\brain'
-$seedBrain = Join-Path $root 'runtime\brain-seed'
-if ($env:ALICE_SKIP_BRAIN_DATA -eq '1') {
-  Write-Output "Bỏ qua tri thức (ALICE_SKIP_BRAIN_DATA=1) — bản build sẽ KHÔNG có recall."
-  if (Test-Path $seedBrain) { Remove-Item $seedBrain -Recurse -Force }
-} elseif (Test-Path (Join-Path $srcBrain 'sag.db')) {
-  Write-Output "Dựng bản seed tri thức…"
-  if (Test-Path $seedBrain) { Remove-Item $seedBrain -Recurse -Force }
-  New-Item -ItemType Directory -Force -Path $seedBrain | Out-Null
-  # `.secret_key` KHÔNG đi theo: mỗi bản cài tự sinh khoá của nó.
-  robocopy $srcBrain $seedBrain /E /NFL /NDL /NJH /NJS /NP /XF '.secret_key' | Out-Null
-  if ($LASTEXITCODE -ge 8) { throw "robocopy hỏng (mã $LASTEXITCODE)" }
-  $n = (Get-ChildItem $seedBrain -Recurse -File).Count
-  if ($n -lt 1000) { throw "Bản seed chỉ có $n file — nguồn có hơn 37.000." }
-  Write-Output ("      {0:N0} file" -f $n)
-} else {
-  Write-Warning "Không có $srcBrain — chạy ``npm run import:brain-data`` nếu muốn bản build có recall."
+# ── Chốt chặn: KHÔNG để tri thức của ai lọt vào bộ cài ─────────────────────
+# Alice khởi đầu với brain RỖNG và tự đắp dần (đúng cách ALICE CODING hoạt động).
+# Tri thức của một project là dữ liệu của người đó; nhét vào bộ cài phát cho người
+# khác là phát tán dữ liệu nhầm chỗ. Bản đầu của script này đã suýt đưa 546MB nhật
+# ký quyết định của một khách hàng vào một repo public.
+#
+# Bỏ nó ra còn đổi lại ba thứ: bộ cài từ ~1,9GB xuống ~350MB, lọt trần 2GB của
+# GitHub Release, và CI dựng được cho cả ba hệ điều hành.
+$leak = Join-Path $root 'runtime\brain-seed'
+if (Test-Path $leak) {
+  Write-Output "Gỡ runtime\brain-seed (tri thức không đi theo bộ cài)…"
+  Remove-Item $leak -Recurse -Force
 }
 
 Write-Output "Build bằng $node24"

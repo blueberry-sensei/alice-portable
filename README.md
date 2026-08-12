@@ -187,38 +187,51 @@ npm run bundle:opencode
 npm run build
 ```
 
-Ra `dist\win-unpacked\` — đây chính là thư mục đưa cho người dùng ở Phần 1.
-
-Muốn kèm recall thì chèn hai bước này trước `npm run build`:
-
-```bash
-npm run bundle:brain
-```
-
-```bash
-npm run import:brain-data
-```
-
-Cả hai cần biết container brain nào:
+Muốn Alice có recall thì thêm một bước nữa (cần Docker + một Alice Brain đang chạy):
 
 ```bash
 set ALICE_BRAIN_CONTAINER=ten-container-brain-cua-ban
 ```
 
-Không chạy `import:brain-data` thì brain lên được nhưng database chưa cả schema, và
-mọi truy vấn chết ở `no such table: sources` — có vỏ mà không có tri thức.
+```bash
+npm run bundle:brain
+```
 
-`npm run build` ra hai thứ trong `dist\`:
+Bước này chỉ nhúng **phần chạy** của brain (Python + thư viện), **không** nhúng tri
+thức. `npm run build` ra hai thứ trong `dist\`:
 
 | Cái nào | Cho ai |
 |---|---|
 | `Alice-Setup-<ver>.exe` | **Người dùng cuối** — bấm đúp là cài. Đây là thứ upload lên Releases |
 | `win-unpacked\` | Ai muốn bản mang đi được (USB), hoặc không có quyền cài |
 
-Bộ cài cố ý **không** chứa `alice.db` (lịch sử chat), **không** chứa API key,
-**không** chứa `.secret_key`. Tri thức thì có — nó đi kèm dưới dạng bản *seed* trong
-`runtime\brain-seed\`, và app tự bung sang `alice-data\brain\` ở lần chạy đầu (bung
-tại chỗ thì mỗi lần cập nhật sẽ xoá mất những gì brain học thêm).
+## Tri thức: Alice bắt đầu từ con số không
+
+Bộ cài **không mang tri thức của ai theo**. Lần đầu chạy, app dựng một brain **rỗng**
+(khoảng 3 giây) rồi Alice tự đắp dần khi làm việc — đúng cách
+[ALICE CODING](https://github.com/blueberry-sensei/alice-coding) hoạt động: năm lớp
+`wiki` / `decisions` / `mistakes` / `context` / `changelog`, ghi theo từng lượt.
+
+Hai lý do, và lý do đầu quan trọng hơn:
+
+1. **Tri thức của một project là dữ liệu của người đó.** Nhét brain của project A vào
+   bộ cài phát cho người B là phát tán dữ liệu nhầm chỗ. Bản đầu của script build ở
+   đây đã làm đúng lỗi đó — 546 MB nhật ký quyết định của một khách hàng suýt đi vào
+   một repo public.
+2. Bỏ ra thì bộ cài từ ~1,9 GB xuống **~350 MB**, lọt trần 2 GB của GitHub Release,
+   và CI dựng được cho cả ba hệ điều hành.
+
+Bộ cài cũng **không** chứa `alice.db` (lịch sử chat), **không** chứa API key,
+**không** chứa `.secret_key`.
+
+Muốn nạp sẵn tri thức của **chính bạn** vào bản bạn tự dùng:
+
+```bash
+npm run import:brain-data
+```
+
+Nó chép `sag.db` + LanceDB từ brain của bạn vào `alice-data\` — tức là vào **bản dùng
+riêng**, không vào bộ cài đem phát.
 
 ## Phát hành cho khách
 

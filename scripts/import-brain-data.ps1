@@ -1,18 +1,20 @@
-﻿# Nạp tri thức đã tích luỹ từ brain đang chạy vào bản portable.
+﻿# Nạp tri thức đã tích luỹ từ brain đang chạy vào BẢN DÙNG RIÊNG của bạn.
 #
-# Không có bước này thì brain trong app là một cái vỏ: MCP bắt tay được, tool đủ,
-# mà `search` trả rỗng. `D-0053` mục 2 nói "không được giảm năng lực recall" — một
-# brain rỗng là giảm tới 100%.
+# ⚠️ Thứ này KHÔNG đi vào bộ cài đem phát. Alice trong bộ cài khởi đầu với brain
+# RỖNG và tự đắp dần — tri thức của một project là dữ liệu của người đó, nhét vào
+# bộ cài phát cho người khác là phát tán dữ liệu nhầm chỗ.
 #
 # Copy hai thứ:
 #   - `sag.db`   — SQLite: source, document, chunk, entity, telemetry
-#   - `engine/`  — LanceDB: vector đã embed (phần nặng, ~650MB)
-$ErrorActionPreference = 'Stop'
+#   - `engine/`  — LanceDB: vector đã embed (phần nặng, vài trăm MB)
 
+# `param()` PHẢI đứng trước mọi câu lệnh (chú thích không tính).
 param(
   # Xem ghi chú ở bundle-brain.ps1: tên container không được ghi cứng.
   [string]$Container = $(if ($env:ALICE_BRAIN_CONTAINER) { $env:ALICE_BRAIN_CONTAINER } else { '' })
 )
+
+$ErrorActionPreference = 'Stop'
 
 $root    = Split-Path -Parent $PSScriptRoot
 $dataDir = Join-Path $root 'alice-data\brain'
