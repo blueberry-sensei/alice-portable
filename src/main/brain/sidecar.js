@@ -35,7 +35,11 @@ class BrainSidecar {
   constructor(brainSettings, paths = {}) {
     this.settings = brainSettings || {};
     this.runtimeDir = paths.runtimeDir || path.join(config.RESOURCES_DIR, 'brain');
-    this.pythonPath = path.join(this.runtimeDir, 'python', 'python.exe');
+    // Windows: python embeddable đặt python.exe ngay trong runtime/brain/python.
+    // macOS/Linux: bundle là cả cây python (bin/python3).
+    this.pythonPath = process.platform === 'win32'
+      ? path.join(this.runtimeDir, 'python', 'python.exe')
+      : path.join(this.runtimeDir, 'python', 'bin', 'python3');
     this.appDir = path.join(this.runtimeDir, 'app');
     this.dataDir = paths.dataDir || path.join(config.DATA_DIR, 'brain');
     this.proc = null;

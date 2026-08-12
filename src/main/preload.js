@@ -23,7 +23,11 @@ contextBridge.exposeInMainWorld('alice', {
 
   // Key đi một chiều: renderer GỬI vào được, nhưng không có đường nào đọc ngược ra.
   setApiKey: (provider, key) => ipcRenderer.invoke('alice:auth:set', { provider, key }),
-  importAuth: () => ipcRenderer.invoke('alice:auth:import'),
+
+  // Chẩn đoán: nhật ký lỗi (tail) + mở thư mục logs + transcript gần đây kèm meta.
+  debugLog: () => ipcRenderer.invoke('alice:debug:log'),
+  debugOpen: () => ipcRenderer.invoke('alice:debug:open'),
+  debugTranscript: (limit) => ipcRenderer.invoke('alice:debug:transcript', limit),
 
   getSettings: () => ipcRenderer.invoke('alice:settings:get'),
   setSettings: (patch) => ipcRenderer.invoke('alice:settings:set', patch),

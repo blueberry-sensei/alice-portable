@@ -55,14 +55,7 @@ Không phải cài gì thêm. App nằm ở:
 dist\win-unpacked\Alice.exe
 ```
 
-Bấm đúp là chạy. Muốn có lối tắt ngoài Desktop:
-
-```bash
-powershell -ExecutionPolicy Bypass -File scripts\make-shortcut.ps1
-```
-
-Lần đầu mở, bấm nút **"Máy này đã cài opencode — dùng luôn chìa khoá đó"** là xong —
-máy đã cài opencode thì khỏi phải dán API key.
+Bấm đúp là chạy. Lần đầu mở, dán API key vào màn hình chào (cách lấy ở dưới) là xong.
 
 ⚠️ Mỗi lần chạy `npm run build`, thư mục `dist\win-unpacked\` bị **dọn sạch và dựng
 lại** — chìa khoá và lịch sử chat trong đó mất theo. Muốn giữ thì copy
@@ -98,9 +91,6 @@ Chìa khoá là thứ cho phép Alice gọi được model AI. Lấy như sau:
 
 **Bước 4.** Quay lại Alice, dán vào ô, bấm **Bắt đầu**.
 
-*(Nếu máy bạn tình cờ đã cài sẵn opencode, Alice hiện thêm nút **"Máy này đã cài
-opencode — dùng luôn chìa khoá đó"** — bấm là xong, khỏi làm bốn bước trên.)*
-
 **Chỉ làm một lần.** Lần sau mở là chat được ngay.
 
 ## Chat
@@ -132,7 +122,13 @@ irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/insta
 ```
 
 Nó tải bản mới nhất và cài đè. **Lịch sử chat, ảnh và chìa khoá của bạn giữ nguyên** —
-chúng nằm ở chỗ khác, bộ cài không đụng vào.
+chúng nằm trong `alice-data`, và bộ cài từ bản 0.1.3 trở đi **không đụng vào thư mục
+đó** khi cài đè hay khi gỡ app.
+
+> ⚠️ Các bản cũ hơn 0.1.3 (0.1.2 trở về trước) đã phát hành với bộ gỡ cài xoá sạch
+> thư mục cài, nên nếu máy bạn đang chạy một bản CŨ, hãy copy thư mục `alice-data`
+> ra ngoài **trước khi** cài đè bản mới, rồi đặt nó trở lại thư mục cài sau khi cài
+> xong. Các bản từ 0.1.3 tự làm việc này.
 
 ## Gỡ Alice
 
@@ -148,7 +144,7 @@ nơi bạn đã cài Alice.
 | Thanh trên cùng báo **"Thiếu chìa khoá"** | Bấm **⚙**, dán API key vào ô *API key OpenCode*, bấm Lưu |
 | Alice trả lời chậm hoặc báo lỗi model | Bấm **⚙** → Model → để trống ô đó. Alice sẽ tự đổi sang model khác khi một model hỏng |
 | Lần đầu chat chờ hơi lâu | Bình thường, lần đầu app dựng vài thứ. Từ lần sau nhanh |
-| Bấm mãi không lên | Mở lại. Nếu vẫn không, gửi thư mục `alice-data\logs` cho người đưa app |
+| Bấm mãi không lên | Mở lại. Nếu vẫn không, bấm **⚠** ở góc trên (màn hình chẩn đoán), bấm *Mở thư mục nhật ký*, rồi gửi cả thư mục `alice-data\logs` cho người đưa app |
 
 > ⚠️ **Model miễn phí có thể dùng dữ liệu bạn gửi để huấn luyện.** Đừng gõ thông tin
 > cá nhân, mật khẩu hay dữ liệu khách hàng vào model free — với những việc đó, chọn
@@ -165,9 +161,11 @@ nơi bạn đã cài Alice.
 | Windows | 10/11 x64 | |
 | [Node.js](https://nodejs.org) | **≥ 22** | Chỉ lúc build. Node 20 **không** build được — `electron-builder` kéo `@noble/hashes` v2 vốn ESM-only |
 | [OpenCode](https://opencode.ai/docs) | bất kỳ | Chỉ lúc đóng gói, để lấy binary nhúng vào app |
-| Alice Brain (Docker) | | Chỉ lúc đóng gói, nếu muốn có recall |
+| Python | 3.11+ | Chỉ lúc đóng gói bản **macOS/Linux**: bộ cài lấy python sẵn có để copy vào runtime (Windows dùng bản embeddable tự tải) |
 
-Không có brain thì Alice vẫn chat bình thường, chỉ là không tra được tri thức.
+Alice Brain **không cần gì thêm**: bộ cài mang sẵn phần chạy của brain (lấy từ
+GitHub khi đóng gói). Không Docker, không container, không cần tri thức của ai — brain
+rỗng tự dựng ở lần chạy đầu.
 
 ## Dựng
 
@@ -187,23 +185,25 @@ npm run bundle:opencode
 npm run build
 ```
 
-Muốn Alice có recall thì thêm một bước nữa (cần Docker + một Alice Brain đang chạy):
-
-```bash
-set ALICE_BRAIN_CONTAINER=ten-container-brain-cua-ban
-```
-
-```bash
-npm run bundle:brain
-```
-
-Bước này chỉ nhúng **phần chạy** của brain (Python + thư viện), **không** nhúng tri
-thức. `npm run build` ra hai thứ trong `dist\`:
+`npm run build` **tự nhúng cả brain**: `bundle-brain.ps1 -Source github` lấy
+`sag_api` + `sag_agent` + `alicecore` (đều thuần Python) từ GitHub rồi cài phần
+native bằng wheel đúng hệ điều hành — không cần Docker, không cần container.
+Bước này chỉ nhúng **phần chạy** của brain, **không** nhúng tri thức. `npm run build`
+ra hai thứ trong `dist\`:
 
 | Cái nào | Cho ai |
 |---|---|
 | `Alice-Setup-<ver>.exe` | **Người dùng cuối** — bấm đúp là cài. Đây là thứ upload lên Releases |
 | `win-unpacked\` | Ai muốn bản mang đi được (USB), hoặc không có quyền cài |
+
+Muốn dựng brain từ **brain đang chạy của chính mình** (không phải từ GitHub) thì dùng
+`npm run bundle:brain` — tức `bundle-brain.ps1 -Source container` (cần Docker + một
+Alice Brain đang chạy):
+
+```bash
+set ALICE_BRAIN_CONTAINER=ten-container-brain-cua-ban
+npm run bundle:brain
+```
 
 ## Tri thức: Alice bắt đầu từ con số không
 
@@ -278,6 +278,7 @@ alice-data/
   settings.json     model, trần ngữ cảnh, cấu hình nén
   avatar.png        ảnh người dùng tự chọn (nếu có)
   brain/            SQLite + LanceDB của Alice Brain
+  logs/             nhật ký lỗi (bấm ⚠ trong app để xem hoặc mở thư mục này)
   opencode/         auth + session của engine
 ```
 
@@ -348,6 +349,7 @@ mạng bằng `ALICE_SKIP_E2E=1`. 14 test, gồm engine thật và MCP brain th�
 |---|---|
 | Engine im lặng tới lúc timeout, mà chạy tay thì 4 giây xong | `spawn()` mặc định để **stdin là pipe mở**; `opencode run` nhận nội dung qua stdin nên nó chờ EOF vĩnh viễn. Phải `stdio: ['ignore','pipe','pipe']`. Nhìn từ ngoài y hệt "model chậm" |
 | Bản đã đóng gói chết lúc tạo `alice-data` | `__dirname` nằm trong `resources/app.asar`, nên `../..` ra đường dẫn **bên trong asar**. Bản packaged phải neo vào `path.dirname(app.getPath('exe'))` |
+| Cài đè bản mới lên bản cũ mất sạch lịch sử chat | Uninstaller mặc định của electron-builder chạy `RMDir /r $INSTDIR`, mà `alice-data` nằm NGAY trong đó. Phải tự định nghĩa `customRemoveFiles` (+ backup/restore trong `customInit`/`customInstall`) trong `build/installer.nsh` |
 | Lượt chat đầu treo vài phút trên máy mới | opencode tự `npm install` plugin vào `XDG_CONFIG_HOME` trống. App ship sẵn `runtime/opencode-config/` để tránh |
 | Build chết ở `ERR_REQUIRE_ESM` | Đang chạy `electron-builder` bằng Node 20. Cần Node ≥ 22 |
 | `.ps1` báo lỗi cú pháp ở dòng không liên quan | PowerShell 5.1 đọc `.ps1` **không BOM** theo ANSI → chữ tiếng Việt thành rác, vỡ parser. Chạy `node scripts/fix-ps1-encoding.js` |
@@ -374,14 +376,14 @@ git push --follow-tags
 CI có một chốt chặn cố ý: **fail nếu thấy `runtime/brain-seed` hoặc `alice-data`**
 lúc đóng gói. Bộ cài không bao giờ được mang tri thức của ai theo.
 
-CI **không** dựng phần chạy của brain (cần một container Alice Brain, runner không
-có). Người dùng mới không thiếu gì — Alice tự dựng brain rỗng ở lần chạy đầu; ai
-muốn có sẵn phần chạy của brain trong bộ cài thì dựng tay bằng `npm run build` trên
-máy mình.
+CI **tự** dựng phần chạy của brain trên cả ba hệ điều hành (bước `bundle-brain.ps1
+-Source github` — nguồn từ GitHub, không cần container). Người dùng mới không thiếu
+gì: Alice tự dựng brain rỗng ở lần chạy đầu, và bộ cài đã có sẵn Python + thư viện
+để recall chạy ngay.
 
 ### Còn thiếu
 
-- **Auto-update** — chưa có; cập nhật bằng cách chạy lại lệnh cài.
+- **Auto-update** — chưa có; cập nhật bằng cách chạy lại lệnh cài (dữ liệu giữ nguyên, xem mục *Cập nhật*).
 - **Chữ ký số** — nên Windows SmartScreen và macOS Gatekeeper sẽ cảnh báo lần đầu.
 - **Wizard chọn embedding local hay API** — hiện đọc từ `settings.json`.
 - `runtime\brain` nặng ~900 MB, tỉa được: `markitdown`, `onnxruntime`, `pandas` chỉ

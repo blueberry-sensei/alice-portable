@@ -2,7 +2,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const config = require('../config');
 
@@ -17,9 +16,8 @@ const config = require('../config');
  * Nghĩa là mang thư mục app sang máy khác thì mất sạch auth và session. Nên app trỏ
  * `XDG_DATA_HOME`/`XDG_CONFIG_HOME` vào chính thư mục dữ liệu của mình.
  *
- * Đổi lại: lần đầu chạy sẽ KHÔNG có API key. Không im lặng mượn key của máy — nhân
- * bản credential sau lưng người dùng là việc phải hỏi, kể cả khi tiện. UI có ô nhập
- * key và một nút "mượn key từ máy này" bấm thì mới chạy.
+ * Đổi lại: lần đầu chạy sẽ KHÔNG có API key. Không có đường "mượn key từ máy" —
+ * feedback khách chốt 2026-08-12: LUÔN phải dán key mới, không lấy từ máy (D-0004).
  */
 
 function portableDirs() {
@@ -65,14 +63,10 @@ function portableEnv() {
   };
 }
 
-function hostAuthFile() {
-  return path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
-}
-
 /** Đã có key chưa — chỉ trả tên provider, KHÔNG bao giờ trả giá trị key (D-0004). */
 function authStatus() {
   const { authFile } = portableDirs();
-  const out = { configured: false, providers: [], authFile, hostAvailable: fs.existsSync(hostAuthFile()) };
+  const out = { configured: false, providers: [], authFile };
   try {
     const data = JSON.parse(fs.readFileSync(authFile, 'utf8'));
     out.providers = Object.keys(data);
@@ -95,17 +89,6 @@ function setApiKey(provider, key) {
   return authStatus();
 }
 
-/** Copy auth của máy sang thư mục portable. Chỉ chạy khi người dùng bấm nút. */
-function importFromHost() {
-  const src = hostAuthFile();
-  if (!fs.existsSync(src)) throw new Error(`Máy này chưa có ${src} — chạy "opencode auth login" trước.`);
-  const { authFile } = portableDirs();
-  fs.mkdirSync(path.dirname(authFile), { recursive: true });
-  fs.copyFileSync(src, authFile);
-  fs.chmodSync(authFile, 0o600);
-  return authStatus();
-}
-
 module.exports = {
-  portableDirs, portableEnv, authStatus, setApiKey, importFromHost, hostAuthFile, seedConfigDir,
+  portableDirs, portableEnv, authStatus, setApiKey, seedConfigDir,
 };

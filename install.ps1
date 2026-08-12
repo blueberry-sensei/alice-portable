@@ -57,7 +57,10 @@ if (-not $asset) {
 }
 
 $sizeMb = [math]::Round($asset.size / 1MB)
-Say "        Bản $($rel.tag_name) · $sizeMb MB"
+# Sau khi giải nén, Alice chiếm nhiều hơn file tải (python + brain nén rất tốt).
+# Ước lượng ~2,5 lần; báo trước để khách không giật mình khi thấy "hết đĩa".
+$neededMb = [math]::Round($sizeMb * 2.5)
+Say "        Bản $($rel.tag_name) · tải về $sizeMb MB · cần ~$neededMb MB trống trên đĩa"
 
 # ── 2. Tải ─────────────────────────────────────────────────────────────────
 $dest = Join-Path ([Environment]::GetFolderPath('UserProfile')) "Downloads\$($asset.name)"

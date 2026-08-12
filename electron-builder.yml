@@ -78,6 +78,9 @@ nsis:
   createStartMenuShortcut: true
   runAfterFinish: true
   deleteAppDataOnUninstall: false   # gỡ app KHÔNG xoá lịch sử chat của người dùng
+  # Script tuỳ chỉnh: giữ `alice-data` khi cài đè / gỡ — uninstaller mặc định xoá
+  # sạch $INSTDIR, và dữ liệu của app nằm NGAY trong đó.
+  include: build/installer.nsh
   installerLanguages:
     - vi_VN
     - en_US

@@ -8,11 +8,22 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-$node24 = @(
-  "$env:APPDATA\nvm\v24.14.0\node.exe",
-  "$env:APPDATA\nvm\v22.12.0\node.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $node24) { throw "Không tìm thấy Node >= 22. electron-builder 26 không chạy trên Node 20." }
+# Quét nvm lấy bản Node >= 22 BẤT KỲ (không ghim tên bản: máy khác có thể chỉ cài
+# một bản khác, và electron-builder 26 chết ngay trên Node 20). nvm có thể nằm ở
+# %APPDATA%\nvm hoặc %LOCALAPPDATA%\nvm tuỳ cách cài.
+$node24 = $null
+foreach ($nvmRoot in @((Join-Path $env:APPDATA 'nvm'), (Join-Path $env:LOCALAPPDATA 'nvm'))) {
+  if (-not (Test-Path $nvmRoot)) { continue }
+  foreach ($ver in Get-ChildItem $nvmRoot -Directory | Sort-Object Name -Descending) {
+    $cand = Join-Path $ver.FullName 'node.exe'
+    if (Test-Path $cand) {
+      $major = [int](($ver.Name.TrimStart('v')) -split '\.')[0]
+      if ($major -ge 22) { $node24 = $cand; break }
+    }
+  }
+  if ($node24) { break }
+}
+if (-not $node24) { throw "Không tìm thấy Node >= 22 trong nvm (đã tìm %APPDATA% và %LOCALAPPDATA%). electron-builder 26 không chạy trên Node 20." }
 
 $builder = Join-Path $root 'node_modules\electron-builder\out\cli\cli.js'
 if (-not (Test-Path $builder)) { throw "Chưa cài electron-builder: $builder" }

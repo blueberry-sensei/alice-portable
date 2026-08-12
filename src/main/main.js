@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 
 const config = require('./config');
+const log = require('./log');
 const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { OpencodeEngine } = require('./engine/opencode');
@@ -91,11 +92,13 @@ function createWindow() {
 }
 
 async function boot() {
+  log.info(`boot: root=${config.ROOT}`);
   settings = config.loadSettings();
   fs.mkdirSync(config.DATA_DIR, { recursive: true });
 
   store = new Store(config.dbPath());
   engine = new OpencodeEngine(settings);
+  log.info(`boot: engine=${engine.binSource} ${engine.binPath || '(missing)'}`);
 
   // Nén bằng chính model đang dùng. Hỏng thì `Memory` tự rơi về nén cơ học —
   // thà tóm tắt thô còn hơn xoay session với mồi rỗng.
@@ -137,16 +140,19 @@ async function startBrain() {
     brain.ensureSchema();
     if (win) win.webContents.send('alice:busy', null);
   } catch (err) {
+    log.error(`brain.ensureSchema: ${err.message}`);
     if (win) win.webContents.send('alice:busy', null);
     if (win) win.webContents.send('alice:brain-error', `Không dựng được trí nhớ: ${err.message}`);
   }
 
   try {
     await brain.start();
+    log.info(`brain: sidecar started on ${brain.settings.host || '127.0.0.1'}:${brain.settings.port || 8931}`);
     return brain.mcpConfig();
   } catch (err) {
     // Brain hỏng KHÔNG được làm chết app — nhưng phải nói ra, không im lặng chạy
     // tiếp với recall kém đi (D-0053 mục 2 cấm giảm năng lực recall trong im lặng).
+    log.error(`brain: start failed: ${err.message}`);
     if (win) win.webContents.send('alice:brain-error', String(err.message || err));
     return null;
   }
@@ -199,12 +205,27 @@ ipcMain.handle('alice:auth:set', async (_e, { provider, key }) => {
   }
 });
 
-ipcMain.handle('alice:auth:import', async () => {
-  try {
-    return auth.importFromHost();
-  } catch (err) {
-    return { error: String(err.message || err) };
-  }
+// ── chẩn đoán (D-xxxx: khách bấm một nút là thấy log lỗi và transcript) ─────
+
+ipcMain.handle('alice:debug:log', async () => ({
+  file: log.LOG_FILE,
+  lines: log.tail(400),
+}));
+
+ipcMain.handle('alice:debug:open', async () => shell.openPath(log.LOG_DIR));
+
+ipcMain.handle('alice:debug:transcript', async (_e, limit = 30) => {
+  await bootPromise;
+  const conv = store.currentConversation();
+  if (!conv) return [];
+  return store.recent(conv.id, limit).map((m) => ({
+    id: m.id, role: m.role, text: m.text, ts: m.ts,
+    tokensInput: m.tokens_input,
+    engineSession: m.engine_session,
+    meta: (() => {
+      try { return JSON.parse(m.meta || 'null'); } catch { return null; }
+    })(),
+  }));
 });
 
 ipcMain.handle('alice:history', async (_e, limit = 80) => {
@@ -252,8 +273,19 @@ ipcMain.handle('alice:send', async (event, text) => {
     const res = await runTurn(text, (partial, ev) => {
       sender.send('alice:stream', { partial, type: ev.type });
     });
+    // Lượt thành công: ghi chẩn đoán gọn — model nào chạy, thử mấy model hỏng,
+    // session nào, có xoay không. Không bao giờ kèm nội dung tin hay secret.
+    log.info([
+      'turn ok',
+      `model=${res.model || '-'}`,
+      res.attempts && res.attempts.length ? `failed=${res.attempts.map((a) => `${a.model}(${a.error.slice(0, 120)})`).join('|')}` : null,
+      `session=${res.engineSession || '-'}`,
+      res.rotated ? `rotated=${res.rotated.reason}` : null,
+      res.seeded ? 'seeded' : null,
+    ].filter(Boolean).join(' '));
     return res;
   } catch (err) {
+    log.error(`turn failed: ${err.message}`);
     return { error: String(err.message || err) };
   } finally {
     busy = false;
@@ -267,11 +299,13 @@ ipcMain.handle('alice:cancel', async () => engine.cancel());
 app.whenReady().then(async () => {
   createWindow();
   bootPromise = boot().catch((err) => {
+    log.error(`fatal: ${err.stack || err}`);
     if (win) win.webContents.send('alice:fatal', String(err.stack || err));
     throw err;
   });
   try {
     await bootPromise;
+    log.info('boot done — ready');
     if (win) win.webContents.send('alice:ready');
   } catch { /* đã báo ra UI ở trên rồi */ }
 });
