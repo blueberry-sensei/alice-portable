@@ -1,4 +1,4 @@
-﻿# Cài Alice bằng một lệnh.
+# Cài Alice bằng một lệnh.
 #
 # Khách chạy:
 #   irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.ps1 | iex

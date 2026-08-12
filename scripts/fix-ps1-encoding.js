@@ -1,4 +1,4 @@
-// Ghi lại mọi .ps1 dưới dạng UTF-8 CÓ BOM.
+// Ghi lại mọi .ps1 chạy bằng `-File` dưới dạng UTF-8 CÓ BOM.
 //
 // Windows PowerShell 5.1 đọc file .ps1 KHÔNG có BOM theo codepage ANSI của máy. Với
 // script chứa tiếng Việt, mỗi ký tự có dấu biến thành 2-3 ký tự rác — và khi rác đó
@@ -8,13 +8,21 @@
 // Cùng họ M-0004 (script Python phải reconfigure UTF-8 cho stdin/stdout trên Windows),
 // chỉ khác là ở đây lỗi xảy ra lúc PARSE chứ không phải lúc chạy — nên nó giết cả
 // script chứ không chỉ làm hỏng một dòng in.
+//
+// NGOẠI LỆ (M-0066): `install.ps1` không chạy bằng `-File` — nó bị `irm` tải về thành
+// STRING rồi `iex`. Đọc file thì PowerShell tự strip BOM trước khi parse; nhưng khi
+// parse một string (`iex`), BOM bị giữ lại làm ký tự ﻿ thật ở đầu, và `#` ngay
+// sau nó không còn được coi là bắt đầu comment nữa → toàn bộ dòng đầu bị hiểu thành
+// tên lệnh `﻿#`, ném `CommandNotFoundException`. Nên các script chỉ chạy qua
+// `irm | iex` (không bao giờ qua `-File`) phải NGƯỢC LẠI — luôn bỏ BOM.
 const fs = require('node:fs');
 const path = require('node:path');
 
 // Quét cả `scripts/` lẫn gốc repo: `install.ps1` nằm ở gốc (để đường dẫn raw ngắn
-// cho khách dán), và nó cũng vỡ y hệt nếu thiếu BOM.
+// cho khách dán).
 const dirs = [__dirname, path.resolve(__dirname, '..')];
 const BOM = '﻿';
+const NEVER_BOM = new Set(['install.ps1']); // chỉ chạy qua irm | iex, không qua -File
 let fixed = 0;
 
 const files = dirs.flatMap((d) =>
@@ -24,9 +32,17 @@ const problems = [];
 
 for (const p of files) {
   const name = path.relative(path.resolve(__dirname, '..'), p);
+  const base = path.basename(p);
   let text = fs.readFileSync(p, 'utf8');
 
-  if (!text.startsWith(BOM)) {
+  if (NEVER_BOM.has(base)) {
+    if (text.startsWith(BOM)) {
+      text = text.slice(BOM.length);
+      fs.writeFileSync(p, text, 'utf8');
+      console.log('BOM -', name, '(chạy qua irm | iex, không được có BOM)');
+      fixed += 1;
+    }
+  } else if (!text.startsWith(BOM)) {
     fs.writeFileSync(p, BOM + text, 'utf8');
     console.log('BOM +', name);
     fixed += 1;
@@ -52,7 +68,7 @@ for (const p of files) {
   }
 }
 
-console.log(fixed ? `Đã sửa ${fixed} file.` : 'Mọi .ps1 đã có BOM.');
+console.log(fixed ? `Đã sửa ${fixed} file.` : 'Mọi .ps1 đã đúng quy ước BOM.');
 
 if (problems.length) {
   console.error('\nLỖI:');
