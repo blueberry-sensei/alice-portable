@@ -16,6 +16,7 @@ const avatar = require('./avatar');
 const { BrainSidecar } = require('./brain/sidecar');
 const { Scheduler } = require('./scheduler');
 const { Updater } = require('./updater');
+const { PublicServer } = require('./public-server');
 const registryModule = require('./registry');
 
 let win = null;
@@ -28,6 +29,9 @@ let settings = null;
 let busy = false;
 let scheduler = null;  // lịch hẹn của Alice ĐANG MỞ (bảng lịch nằm trong chat db)
 let registry = { active: null, alices: [] };
+// Alice đang được public làm máy chủ: id → PublicServer (chạy độc lập với
+// Alice đang mở trên màn hình).
+const publicServers = new Map();
 
 // Cửa sổ đóng (bấm X) chỉ ẨN app — chat app phải sống tiếp để nhận lịch hẹn và
 // không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
@@ -163,6 +167,8 @@ async function activateAlice(id) {
 
   const base = config.aliceDir(id);
   engine.setBaseDir(base);
+  // Model là của RIÊNG Alice (chọn lúc tạo, đổi trong Settings của nó).
+  engine.settings = { ...settings, model: alice.model || null };
 
   store = new Store(path.join(base, 'chat.db'));
   memory = new Memory(store, settings, makeSummarizer());
@@ -241,6 +247,7 @@ ipcMain.handle('alice:status', async () => {
     conversation: store ? store.currentConversation() : null,
     messageCount: store ? store.count() : 0,
     update: updater.status(),
+    model: (currentAlice() || {}).model || null,
   };
 });
 
@@ -248,34 +255,47 @@ ipcMain.handle('alice:status', async () => {
 
 ipcMain.handle('alice:alice:list', async () => {
   await bootPromise;
-  // Dashboard cần đủ: tên, đường dẫn folder, avatar, có key chưa.
+  // Dashboard cần đủ: tên, đường dẫn folder, avatar, có key chưa, public chưa.
   const alices = registry.alices.map((a) => {
     const base = config.aliceDir(a.id);
+    const pub = publicServers.get(a.id);
     return {
       ...a,
       dir: base,
       hasKey: auth.authStatus(base).configured,
       avatarUri: avatar.current(base),
+      public: pub && pub.running ? { enabled: true, port: pub.port } : { enabled: false, port: null },
     };
   });
   return { alices, active: registry.active };
 });
 
-ipcMain.handle('alice:alice:create', async (_e, { name, key }) => {
+ipcMain.handle('alice:alice:create', async (_e, { name, key, model }) => {
   await bootPromise;
   const nameT = String(name || '').trim();
   const keyT = String(key || '').trim();
   if (!nameT) return { error: 'Nhập tên cho Alice.' };
   if (!keyT) return { error: 'Alice cần một chìa khoá riêng.' };
-  const { state, alice } = registryModule.create({ name: nameT, key: keyT });
+  const { state, alice } = registryModule.create({ name: nameT, key: keyT, model: model || null });
   registry = state;
-  log.info(`alice created: ${alice.id} (${alice.name})`);
+  log.info(`alice created: ${alice.id} (${alice.name}) model=${alice.model || 'auto'}`);
   try {
     await activateAlice(alice.id);
   } catch (err) {
     return { error: String(err.message || err) };
   }
   return { alice };
+});
+
+ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
+  await bootPromise;
+  const { state, updated } = registryModule.update(id, { model });
+  if (!updated) return { error: 'Không tìm thấy Alice.' };
+  registry = state;
+  if (registry.active === id) {
+    engine.settings = { ...engine.settings, model: model || null };
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('alice:alice:select', async (_e, id) => {
@@ -290,6 +310,12 @@ ipcMain.handle('alice:alice:select', async (_e, id) => {
 
 ipcMain.handle('alice:alice:remove', async (_e, id) => {
   await bootPromise;
+  // Tắt máy chủ của Alice bị xoá trước khi xoá dữ liệu.
+  const pub = publicServers.get(id);
+  if (pub) {
+    pub.stop();
+    publicServers.delete(id);
+  }
   const { state, removed } = registryModule.remove(id);
   registry = state;
   if (!removed) return { error: 'Không tìm thấy Alice.' };
@@ -307,6 +333,102 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
     if (win) win.webContents.send('alice:alice-changed', { id: null, alices: [], active: null });
   }
   return { ok: true };
+});
+
+// ── public: biến Alice thành máy chủ ───────────────────────────────────────
+
+/** Lấy PublicServer của Alice (tạo mới nếu chưa có — chưa start). */
+function publicServerFor(id) {
+  let pub = publicServers.get(id);
+  if (!pub) {
+    const alice = registry.alices.find((a) => a.id === id);
+    if (!alice) throw new Error('Không tìm thấy Alice.');
+    const base = config.aliceDir(id);
+    const bs = new BrainSidecar(settings.brain || {}, { dataDir: path.join(base, 'brain') });
+    pub = new PublicServer({
+      alice,
+      baseDir: base,
+      settings,
+      engine,
+      brainMcp: bs.available ? bs.mcpConfig() : null,
+      log,
+    });
+    publicServers.set(id, pub);
+  }
+  return pub;
+}
+
+ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    if (enabled) {
+      if (pub.running) return { ok: true };
+      const cfg = pub.config();
+      if (!cfg.tokens.length) return { error: 'Chưa có token truy cập nào — tạo token trước khi public.' };
+      const p = Number(port) || cfg.port || 8931;
+      await pub.start(p);
+      const newCfg = pub.config();
+      pub.saveConfig({ ...newCfg, enabled: true, port: p });
+    } else {
+      pub.stop();
+      const cfg = pub.config();
+      pub.saveConfig({ ...cfg, enabled: false });
+    }
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:info', async (_e, id) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    const ips = require('node:os').networkInterfaces();
+    const addrs = [];
+    for (const list of Object.values(ips)) {
+      for (const a of list || []) {
+        if (a.family === 'IPv4' && !a.internal) addrs.push(a.address);
+      }
+    }
+    return {
+      enabled: pub.running,
+      port: pub.port || cfg.port,
+      tokens: cfg.tokens,
+      urls: { local: `http://127.0.0.1:${pub.port || cfg.port}`, lan: addrs.map((ip) => `http://${ip}:${pub.port || cfg.port}`) },
+    };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:token:add', async (_e, id, label) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    const token = require('./public-server').newToken();
+    cfg.tokens.push({ label: String(label || '').trim() || 'Không tên', token, created_at: Date.now() });
+    pub.saveConfig(cfg);
+    return { token };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:token:remove', async (_e, id, token) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    cfg.tokens = cfg.tokens.filter((t) => t.token !== token);
+    pub.saveConfig(cfg);
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
 });
 
 ipcMain.handle('alice:avatar:get', async () => {
@@ -460,6 +582,8 @@ ipcMain.handle('alice:sched:remove', async (_e, id) => {
 ipcMain.handle('alice:shutdown', async () => {
   log.info('shutdown requested from UI');
   isQuitting = true;
+  for (const pub of publicServers.values()) pub.stop();
+  publicServers.clear();
   if (scheduler) scheduler.stop();
   if (brain) brain.stop();
   if (store) {
@@ -474,7 +598,9 @@ ipcMain.handle('alice:settings:get', async () => settings);
 
 ipcMain.handle('alice:settings:set', async (_e, patch) => {
   settings = config.saveSettings({ ...settings, ...patch });
-  engine.settings = settings;
+  // Model là của RIÊNG Alice — settings chung không được ghi đè model đang dùng.
+  const alice = currentAlice();
+  engine.settings = { ...settings, model: (alice && alice.model) || null };
   if (memory) memory.settings = settings;
   provisionWorkspace(settings, { brainMcp: brain && brain.available ? brain.mcpConfig() : null });
   return settings;
@@ -553,6 +679,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('window-all-closed', () => {
     // Cửa sổ chỉ bị ẩn chứ không đóng, nên sự kiện này chỉ tới khi thoát THẬT.
+    for (const pub of publicServers.values()) pub.stop();
+    publicServers.clear();
     if (scheduler) scheduler.stop();
     if (brain) brain.stop();
     if (store) store.close();

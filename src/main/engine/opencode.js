@@ -128,6 +128,7 @@ class OpencodeEngine {
       let tokens = null;
       let stderr = '';
       let timedOut = false;
+      let firstError = null; // event {"type":"error"} — lỗi thật của opencode/model
 
       /**
        * Đồng hồ IM LẶNG, không phải đồng hồ tổng thời gian.
@@ -173,6 +174,12 @@ class OpencodeEngine {
         events.push(ev);
         if (ev.sessionID) resolvedSession = ev.sessionID;
 
+        // Event lỗi của opencode/model — trước đây bị BỎ QUA nên lượt lỗi trả về
+        // text rỗng, UI hiện "Alice không trả lời gì" mà không nói lý do.
+        if (ev.type === 'error' && ev.error) {
+          const msg = (ev.error.data && ev.error.data.message) || ev.error.name || 'lỗi không rõ';
+          if (!firstError) firstError = { message: msg, name: ev.error.name || '' };
+        }
         if (ev.type === 'text' && ev.part) {
           textParts.set(ev.part.id, ev.part.text || '');
         }
@@ -207,9 +214,14 @@ class OpencodeEngine {
           return;
         }
         if (code !== 0 && !text) {
-          reject(new Error(
-            `opencode thoát mã ${code}${stderr ? `: ${stderr.trim().slice(0, 500)}` : ''}`
-          ));
+          // stderr rỗng nhưng opencode có nói lỗi qua event NDJSON → ưu tiên event đó.
+          const why = (firstError ? firstError.message : '')
+            || (stderr ? stderr.trim().slice(0, 500) : '(opencode thoát mà không nói lý do)');
+          reject(new Error(`opencode thoát mã ${code} (model ${model}): ${why}`));
+          return;
+        }
+        if (code === 0 && !text && firstError) {
+          reject(new Error(`${model}: ${firstError.message}`));
           return;
         }
         resolve({ sessionId: resolvedSession, text, tokens, model, events, stderr, code });
@@ -223,11 +235,31 @@ class OpencodeEngine {
    * đổi model là kiểu lỗi rất khó truy về sau.
    */
   async runWithFallback(opts) {
-    const chain = opts.model ? [opts.model] : await this.modelChain();
+    let chain;
+    if (opts.model) {
+      // Model người dùng CHỌN phải còn tồn tại thật (danh sách realtime). Zen đổi
+      // tên/bỏ model theo thời gian — model đã chết mà vẫn cố chạy thì lượt lỗi
+      // câm (đúng ca feedback khách: chọn model đã không còn → "opencode thoát mã 1").
+      let available = null;
+      try { available = await this.listModels(); } catch { /* không hỏi được thì cứ thử */ }
+      if (available && available.includes(opts.model)) {
+        // Model chọn thử TRƯỚC; hỏng (hết số dư, lỗi server...) thì tự chuyển sang
+        // các model còn lại — Alice không kẹt cứng vì một model trả phí hết tiền.
+        const rest = (await this.modelChain()).filter((m) => m !== opts.model);
+        chain = [opts.model, ...rest];
+      } else {
+        // Model không còn tồn tại → bỏ qua nó, dùng chuỗi mặc định.
+        chain = (await this.modelChain()).filter((m) => m !== opts.model);
+        if (chain.length) chain.unshift(`__skipped:${opts.model}`);
+      }
+    } else {
+      chain = await this.modelChain();
+    }
     if (!chain.length) throw new Error('Không có model nào khả dụng (opencode models trả rỗng).');
 
     const attempts = [];
     for (const model of chain) {
+      if (model.startsWith('__skipped:')) continue;
       try {
         const out = await this.run({ ...opts, model });
         return { ...out, attempts };

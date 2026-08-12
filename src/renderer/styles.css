@@ -142,6 +142,15 @@ body {
 .dash-card .card-status.ok { color: var(--ok); border-color: rgba(126,224,168,.4); }
 .dash-card .card-status.warn { color: #FFD28A; border-color: rgba(255,210,138,.35); }
 .dash-card .card-status.active { color: var(--primary-soft); border-color: var(--primary); }
+.dash-card .card-x {
+  position: absolute; top: 8px; right: 10px;
+  width: 22px; height: 22px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+  background: transparent; border: 1px solid transparent;
+}
+.dash-card .card-x:hover { color: var(--danger); border-color: #5C2B2E; background: #2A1215; }
+.dash-card { position: relative; }
 
 .chat {
   position: relative;

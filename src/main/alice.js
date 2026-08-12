@@ -99,18 +99,20 @@ function buildOpencodeJson(settings, { brainMcp = null } = {}) {
 
 /**
  * Tạo/refresh workspace. Trả về đường dẫn.
+ * `dir` mặc định là workspace chung; public server dùng workspace RIÊNG của từng
+ * Alice (`alices/<id>/workspace`) để mỗi máy chủ chạy đúng AGENTS.md + MCP của nó.
  */
-function provisionWorkspace(settings, { brainMcp = null } = {}) {
-  const dir = config.workDir();
-  fs.mkdirSync(dir, { recursive: true });
+function provisionWorkspace(settings, { brainMcp = null, dir = null } = {}) {
+  const target = dir || config.workDir();
+  fs.mkdirSync(target, { recursive: true });
 
-  fs.writeFileSync(path.join(dir, 'AGENTS.md'), buildAgentsMd(config.knowledgeDir()), 'utf8');
+  fs.writeFileSync(path.join(target, 'AGENTS.md'), buildAgentsMd(config.knowledgeDir()), 'utf8');
   fs.writeFileSync(
-    path.join(dir, 'opencode.json'),
+    path.join(target, 'opencode.json'),
     JSON.stringify(buildOpencodeJson(settings, { brainMcp }), null, 2),
     'utf8'
   );
-  return dir;
+  return target;
 }
 
 module.exports = { provisionWorkspace, buildAgentsMd, buildOpencodeJson, NO_NEXT_TURN, MEMORY_NOTE };

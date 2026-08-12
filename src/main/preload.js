@@ -29,7 +29,14 @@ contextBridge.exposeInMainWorld('alice', {
   aliceCreate: (data) => ipcRenderer.invoke('alice:alice:create', data),
   aliceSelect: (id) => ipcRenderer.invoke('alice:alice:select', id),
   aliceRemove: (id) => ipcRenderer.invoke('alice:alice:remove', id),
+  aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
   onAliceChanged: (cb) => ipcRenderer.on('alice:alice-changed', (_e, payload) => cb(payload)),
+
+  // Public: biến Alice thành máy chủ.
+  publicToggle: (id, data) => ipcRenderer.invoke('alice:public:toggle', id, data),
+  publicInfo: (id) => ipcRenderer.invoke('alice:public:info', id),
+  publicTokenAdd: (id, label) => ipcRenderer.invoke('alice:public:token:add', id, label),
+  publicTokenRemove: (id, token) => ipcRenderer.invoke('alice:public:token:remove', id, token),
 
   // Chẩn đoán: nhật ký lỗi (tail) + mở thư mục logs + transcript gần đây kèm meta.
   debugLog: () => ipcRenderer.invoke('alice:debug:log'),

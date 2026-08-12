@@ -50,10 +50,11 @@ function save(state, paths = {}) {
 
 /**
  * Tạo Alice mới. Key bắt buộc do Bệ hạ đặt từ đầu ("User tạo thì bỏ key") — mỗi
- * Alice dùng chìa khoá RIÊNG của nó, không dùng chung với ai.
+ * Alice dùng chìa khoá RIÊNG của nó, không dùng chung với ai. Model cũng riêng
+ * (chọn lúc tạo, đổi được sau) — không lẫn với Alice khác.
  * Trả { state, alice }.
  */
-function create({ name, key }, paths = {}) {
+function create({ name, key, model = null }, paths = {}) {
   const p = resolve(paths);
   const state = load(paths);
   const id = crypto.randomUUID();
@@ -61,6 +62,7 @@ function create({ name, key }, paths = {}) {
     id,
     name: String(name || '').trim() || 'Alice',
     provider: 'opencode',
+    model: model || null,
     created_at: Date.now(),
   };
   state.alices.push(alice);
@@ -74,6 +76,17 @@ function create({ name, key }, paths = {}) {
     auth.setApiKey('opencode', String(key).trim(), dir);
   }
   return { state, alice };
+}
+
+/** Cập nhật một số trường của Alice (vd model). Trả state mới. */
+function update(id, patch, paths = {}) {
+  const state = load(paths);
+  const alice = state.alices.find((a) => a.id === id);
+  if (!alice) return { state, updated: false };
+  if (patch.name !== undefined) alice.name = String(patch.name).trim() || alice.name;
+  if (patch.model !== undefined) alice.model = patch.model || null;
+  save(state, paths);
+  return { state, updated: true };
 }
 
 /**
@@ -152,4 +165,4 @@ function migrateLegacy({ name }, paths = {}) {
   return state;
 }
 
-module.exports = { load, save, create, remove, migrateLegacy, resolve, aliceDirOf };
+module.exports = { load, save, create, update, remove, migrateLegacy, resolve, aliceDirOf };
