@@ -133,6 +133,12 @@ function migrateLegacy({ name }, paths = {}) {
     fs.cpSync(legacyOc, path.join(dir, 'opencode'), { recursive: true });
   }
 
+  // Avatar cũ (ảnh chung của bản một-Alice).
+  for (const ext of ['.png', '.jpg', '.jpeg', '.webp', '.gif']) {
+    const f = path.join(p.dataDir, `avatar${ext}`);
+    if (fs.existsSync(f)) fs.copyFileSync(f, path.join(dir, `avatar${ext}`));
+  }
+
   const alice = {
     id,
     name: name || 'Alice',

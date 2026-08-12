@@ -248,7 +248,17 @@ ipcMain.handle('alice:status', async () => {
 
 ipcMain.handle('alice:alice:list', async () => {
   await bootPromise;
-  return { alices: registry.alices, active: registry.active };
+  // Dashboard cần đủ: tên, đường dẫn folder, avatar, có key chưa.
+  const alices = registry.alices.map((a) => {
+    const base = config.aliceDir(a.id);
+    return {
+      ...a,
+      dir: base,
+      hasKey: auth.authStatus(base).configured,
+      avatarUri: avatar.current(base),
+    };
+  });
+  return { alices, active: registry.active };
 });
 
 ipcMain.handle('alice:alice:create', async (_e, { name, key }) => {
@@ -299,10 +309,10 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
   return { ok: true };
 });
 
-ipcMain.handle('alice:avatar:get', async () => ({
-  uri: avatar.current(),
-  custom: avatar.isCustom(),
-}));
+ipcMain.handle('alice:avatar:get', async () => {
+  const base = registry.active ? config.aliceDir(registry.active) : null;
+  return { uri: avatar.current(base), custom: avatar.isCustom(base) };
+});
 
 ipcMain.handle('alice:avatar:pick', async () => {
   const res = await dialog.showOpenDialog(win, {
@@ -311,14 +321,20 @@ ipcMain.handle('alice:avatar:pick', async () => {
     filters: [{ name: 'Ảnh', extensions: avatar.ALLOWED.map((e) => e.slice(1)) }],
   });
   if (res.canceled || !res.filePaths.length) return { canceled: true };
+  const base = registry.active ? config.aliceDir(registry.active) : null;
+  if (!base) return { error: 'Chưa có Alice nào.' };
   try {
-    return { uri: avatar.set(res.filePaths[0]), custom: true };
+    return { uri: avatar.set(res.filePaths[0], base), custom: true };
   } catch (err) {
     return { error: String(err.message || err) };
   }
 });
 
-ipcMain.handle('alice:avatar:reset', async () => ({ uri: avatar.reset(), custom: false }));
+ipcMain.handle('alice:avatar:reset', async () => {
+  const base = registry.active ? config.aliceDir(registry.active) : null;
+  if (!base) return { uri: avatar.current(null), custom: false };
+  return { uri: avatar.reset(base), custom: false };
+});
 
 ipcMain.handle('alice:auth:set', async (_e, { provider, key }) => {
   if (!provider || !key) return { error: 'Thiếu provider hoặc key.' };

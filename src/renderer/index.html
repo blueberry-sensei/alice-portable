@@ -25,8 +25,22 @@
   </div>
 
   <div class="app">
-    <div class="chat">
+    <!-- Dashboard: quản lý các Alice — màn hình chính khi mở app -->
+    <div class="dash" id="view-dashboard">
+      <div class="dash-head">
+        <div class="dash-brand">
+          <div class="dash-logo">Alice <span class="star">★</span></div>
+          <div class="dash-sub" id="dash-sub">Chọn một Alice để trò chuyện</div>
+        </div>
+        <button class="btn" id="dash-add">＋ Tạo Alice mới</button>
+      </div>
+      <div class="dash-grid" id="dash-grid"></div>
+    </div>
+
+    <!-- Chat: giao diện trò chuyện của Alice đang mở -->
+    <div class="chat" id="view-chat" hidden>
       <div class="head">
+        <button class="icon-btn" id="btn-back" title="Về danh sách Alice">‹</button>
         <!-- Ảnh nạp bằng JS (data URI) chứ không đặt src sẵn: ảnh của người dùng
              nằm ở alice-data/, ngoài thư mục app, nên file:// không qua được CSP. -->
         <div class="ava">
