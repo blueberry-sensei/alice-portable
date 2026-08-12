@@ -48,8 +48,18 @@ jobs:
           cache: npm
 
       # Electron binary tải từ GitHub releases; runner đôi khi dính 503/hang mạng
-      # (đã gặp 2 lần trong 3 vòng). Tăng retry để không fail vì lỗi nhất thời.
-      - run: npm ci --fetch-retries=6 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
+      # (đã gặp nhiều lần). npm retry không phủ postinstall (electron zip tải bằng
+      # got) — nên bọc cả lệnh bằng vòng retry thật.
+      - name: npm ci (có retry)
+        shell: bash
+        run: |
+          for i in 1 2 3 4; do
+            if npm ci --fetch-retries=6 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000; then
+              break
+            fi
+            echo "npm ci lần $i hỏng — chờ 20s thử lại…"
+            sleep 20
+          done
 
       # Nhúng binary opencode. CI không có sẵn nên tải từ npm rồi trỏ script vào.
       - name: Nhúng opencode
@@ -109,8 +119,16 @@ jobs:
         # Bỏ e2e: nó gọi model thật, cần API key mà CI không có.
         run: ALICE_SKIP_E2E=1 node --test test/memory.test.js test/workspace.test.js
 
-      - name: Đóng gói
-        run: npx electron-builder --publish never
+      - name: Đóng gói (có retry)
+        shell: bash
+        run: |
+          for i in 1 2 3 4; do
+            if npx electron-builder --publish never; then
+              break
+            fi
+            echo "electron-builder lần $i hỏng — chờ 20s thử lại…"
+            sleep 20
+          done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
