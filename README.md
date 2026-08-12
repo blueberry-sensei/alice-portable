@@ -7,19 +7,43 @@ cài đặt gì thêm, không cần Docker, không cần tài khoản Claude.
 
 ## Cài Alice
 
-Mở **PowerShell**, dán dòng này, Enter:
+### Cách dễ nhất: bấm một link
+
+Vào **[trang tải](https://github.com/blueberry-sensei/alice-portable/releases/latest)**
+rồi tải file hợp với máy bạn:
+
+| Máy bạn dùng | Tải file | Tình trạng |
+|---|---|---|
+| Windows | `Alice-Setup-….exe` — bấm đúp là cài | ✅ có |
+| macOS | `Alice-….dmg` — mở rồi kéo Alice vào Applications | 🚧 chưa có, xem [Lộ trình](#lộ-trình) |
+| Ubuntu / Linux | `Alice-….AppImage` — cấp quyền chạy rồi bấm đúp | 🚧 chưa có, xem [Lộ trình](#lộ-trình) |
+
+### Hoặc dán một dòng lệnh
+
+**Windows** — dán vào **Command Prompt** hoặc **PowerShell**, cái nào cũng được:
 
 ```
-irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.ps1 | iex
+powershell -NoProfile -Command "irm https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.ps1 | iex"
 ```
 
-Nó tải bộ cài về rồi mở lên. Bấm theo bộ cài là xong.
+**macOS / Ubuntu** — dán vào **Terminal**:
 
-Không thích gõ lệnh? Vào **[trang Releases](https://github.com/blueberry-sensei/alice-portable/releases/latest)**,
-tải file `Alice-Setup-….exe`, bấm đúp.
+```
+curl -fsSL https://raw.githubusercontent.com/blueberry-sensei/alice-portable/main/install.sh | bash
+```
+
+> **Vì sao Windows phải viết dài thế?** Câu ngắn `irm … | iex` chỉ chạy trong
+> PowerShell; dán vào Command Prompt là báo *"'irm' is not recognized"*. Câu dài ở
+> trên chạy được ở **cả hai**, nên khỏi phải nhớ mình đang mở cửa sổ nào.
 
 > Windows hiện bảng xanh *"Windows protected your PC"*? Bấm **More info** → **Run
-> anyway**. Bảng đó hiện vì app chưa mua chữ ký số, không phải vì có virus.
+> anyway**. macOS báo *"Alice cannot be opened"*? Chuột phải vào app → **Open** →
+> **Open**. Cả hai hiện ra vì app chưa mua chữ ký số, không phải vì có virus.
+
+### Máy cần gì trước không?
+
+**Không.** Không cần Docker, không cần WSL, không cần cài Python hay Node. Alice mang
+sẵn mọi thứ bên trong. Cứ tải về và cài.
 
 ---
 
@@ -318,10 +342,34 @@ mạng bằng `ALICE_SKIP_E2E=1`. 14 test, gồm engine thật và MCP brain th�
 | `docker cp` một thư mục ra `/mnt/…` bò ~1MB/phút | 9p của WSL + hàng chục nghìn file nhỏ. Tar thành **một** file rồi giải nén bằng `tar` của Windows |
 | Khối `hidden` vẫn hiện | `display` do class đặt thắng `display:none` mà trình duyệt gán cho `[hidden]` |
 
-## Chưa có gì
+## Lộ trình
 
-- **macOS** và **auto-update** — `.dmg` không cross-build từ Windows, cần runner macOS.
-- **Chữ ký số** — nên Windows SmartScreen sẽ cảnh báo ở lần chạy đầu.
+### macOS và Linux
+
+Mã nguồn không có gì trói vào Windows — Electron, opencode và Alice Brain đều có bản
+cho cả ba hệ. Vướng ở khâu **đóng gói**, hai chỗ:
+
+1. **Không cross-build được.** `.dmg` phải dựng trên macOS, `.AppImage` phải dựng
+   trên Linux. Máy dựng hiện tại là Windows nên chỉ ra được `.exe`.
+   → Cách giải: **GitHub Actions** với ba runner (`windows-latest`, `macos-latest`,
+   `ubuntu-latest`), tag một phát ra cả ba file.
+
+2. **Tri thức không dựng được trên CI.** Bản seed 546 MB được bóc từ một container
+   Alice Brain đang chạy trên máy người dựng — runner của GitHub không có container
+   đó. Và kể cả có, ba bộ cài mỗi bộ ~1,9 GB thì đụng trần 2 GB/file của Releases.
+   → Cách giải: **tách tri thức thành gói tải riêng**. Bộ cài còn ~350 MB (nhẹ hơn
+   nhiều cho khách), app tải gói tri thức về ở lần chạy đầu hoặc khi người dùng bấm.
+
+Việc 2 là thay đổi thiết kế thật, không phải chỉnh cấu hình — nên nó chờ quyết định
+chứ chưa làm.
+
+Ngoài ra, `bundle-brain` hiện chỉ dựng Python cho Windows; bản macOS/Linux cần
+python-build-standalone và wheel của nền tảng tương ứng.
+
+### Còn thiếu
+
+- **Auto-update** — chưa có; cập nhật bằng cách chạy lại lệnh cài.
+- **Chữ ký số** — nên Windows SmartScreen và macOS Gatekeeper sẽ cảnh báo lần đầu.
 - **Wizard chọn embedding local hay API** — hiện đọc từ `settings.json`.
 - `runtime\brain` nặng ~900 MB, tỉa được: `markitdown`, `onnxruntime`, `pandas` chỉ
   cần cho ingest tài liệu, recall không đụng tới.
