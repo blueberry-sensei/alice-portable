@@ -48,12 +48,12 @@ $pyDir     = Join-Path $runtime 'python'
 $appDir    = Join-Path $runtime 'app'
 $pyVersion = '3.12.10'
 
-$isWindows = $env:OS -eq 'Windows_NT'
+$winOs = $env:OS -eq 'Windows_NT'
 
 New-Item -ItemType Directory -Force -Path $runtime, $appDir | Out-Null
 
 # ── 1. Python ──────────────────────────────────────────────────────────────
-if ($isWindows) {
+if ($winOs) {
   $pyExe = Join-Path $pyDir 'python.exe'
   if (-not (Test-Path $pyExe)) {
     Write-Output "[1/5] Tải Python $pyVersion embeddable…"
@@ -104,7 +104,7 @@ if ($isWindows) {
 # Trong PowerShell 5.1, `2>$null` trên một native command làm mỗi dòng stderr thành
 # một ErrorRecord — với $ErrorActionPreference='Stop' thì "pip chưa có" (một tình
 # huống BÌNH THƯỜNG ở bước này) giết luôn cả script.
-if ($isWindows) {
+if ($winOs) {
   $hasPip = Test-Path (Join-Path $pyDir 'Lib/site-packages/pip')
   if (-not $hasPip) {
     Write-Output "[2/5] Cài pip…"
