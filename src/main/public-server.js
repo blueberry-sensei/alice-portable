@@ -1,30 +1,41 @@
 'use strict';
 
 /**
- * Public Server — biến một Alice thành MÁY CHỦ: người khác gọi HTTP tới máy
- * này bằng token do chủ cấp, Alice trả lời bằng CHÍNH trí nhớ của nó.
+ * Public Server — biến một Alice thành MÁY CHỦ có TRANG WEB CHAT.
  *
- * Bệ hạ chốt (2026-08-13): "bấm Public Alice — máy tôi thành máy chủ; người khác
- * access với account tôi cấp; có thể unpublic".
+ * Bệ hạ chốt (2026-08-13): "public là một bản website luôn — người khác quét mã
+ * là vào chat được luôn. Hai mode:
+ *   - anyone: ai có link/QR đều vào chat được, không cần gì;
+ *   - account: phải đăng nhập username + password do chủ Alice tạo trước."
  *
- * Kiến trúc: mỗi Alice public có một worker RIÊNG — mở chat.db của chính nó,
- * session/trí nhớ của chính nó, độc lập với Alice đang mở trên màn hình. Một lượt
- * đồng thời tại một thời điểm (busy toàn cục) — máy cá nhân không cần nhiều hơn.
+ * Kiến trúc: mỗi Alice public có một worker RIÊNG — chat.db, session và trí nhớ
+ * của chính nó, độc lập với Alice đang mở trên màn hình. Một lượt đồng thời.
  *
  * Không dependency mới: node:http. Không HTTP framework.
  */
 
 const http = require('node:http');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { createTurnRunner } = require('./turn');
 const { provisionWorkspace } = require('./alice');
-const auth = require('./engine/auth');
 
 const DEFAULT_PORT = 8931;
+
+/** Băm mật khẩu — KHÔNG bao giờ lưu plaintext (scrypt, salt riêng mỗi tài khoản). */
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(password, account) {
+  const { hash } = hashPassword(password, account.salt);
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(account.hash, 'hex'));
+}
 
 /**
  * @param {object} opts
@@ -49,21 +60,44 @@ class PublicServer {
     this.port = null;
     this.busy = false;
     this.lastError = null;
+    this.sessions = new Map(); // sessionToken → username (chỉ trong bộ nhớ)
+    this.webPage = null;
   }
 
   get running() {
     return Boolean(this.server && this.server.listening);
   }
 
+  /** Cấu hình public của Alice: { enabled, mode, port, tokens, accounts }. */
+  config() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(this.baseDir, 'public.json'), 'utf8'));
+      return {
+        enabled: Boolean(raw.enabled),
+        mode: raw.mode === 'account' ? 'account' : 'anyone',
+        port: raw.port || DEFAULT_PORT,
+        tokens: Array.isArray(raw.tokens) ? raw.tokens : [],
+        accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
+      };
+    } catch {
+      return { enabled: false, mode: 'anyone', port: DEFAULT_PORT, tokens: [], accounts: [] };
+    }
+  }
+
+  saveConfig(cfg) {
+    fs.mkdirSync(this.baseDir, { recursive: true });
+    fs.writeFileSync(path.join(this.baseDir, 'public.json'), JSON.stringify(cfg, null, 2), 'utf8');
+  }
+
   /**
-   * Mở server. Token phải có sẵn trong config trước (do UI tạo) — không có token
-   * nào thì không mở (máy chủ không cửa là vô nghĩa).
+   * Mở server. Mode 'anyone' mở được ngay; mode 'account' cần ít nhất một tài
+   * khoản (máy chủ không cửa là vô nghĩa).
    */
   async start(port) {
     if (this.running) return { ok: true };
     const cfg = this.config();
-    if (!cfg.tokens.length) {
-      throw new Error('Chưa có token truy cập nào — tạo token trước khi public.');
+    if (cfg.mode === 'account' && !cfg.accounts.length) {
+      throw new Error('Chưa có tài khoản nào — thêm username + password trước khi public.');
     }
     if (!this.store) {
       this.store = new Store(path.join(this.baseDir, 'chat.db'));
@@ -71,6 +105,12 @@ class PublicServer {
       const workDir = path.join(this.baseDir, 'workspace');
       provisionWorkspace(this.settings, { brainMcp: this.brainMcp, dir: workDir });
       this.runTurn = createTurnRunner({ store: this.store, memory, engine: this.engine, workDir, settings: this.settings });
+    }
+    try {
+      this.webPage = fs.readFileSync(path.join(__dirname, 'public-web', 'index.html'), 'utf8');
+    } catch (err) {
+      this.webPage = null;
+      this.lastError = `thiếu trang web public: ${err.message}`;
     }
 
     this.port = Number(port) || DEFAULT_PORT;
@@ -82,7 +122,7 @@ class PublicServer {
       });
       this.server.listen(this.port, '0.0.0.0', () => resolve());
     });
-    this.log.info(`public server UP: ${this.alice.name} on :${this.port}`);
+    this.log.info(`public server UP: ${this.alice.name} mode=${cfg.mode} on :${this.port}`);
     return { ok: true };
   }
 
@@ -96,22 +136,8 @@ class PublicServer {
       this.store = null;
       this.runTurn = null;
     }
+    this.sessions.clear();
     this.log.info(`public server DOWN: ${this.alice.name}`);
-  }
-
-  /** Cấu hình public của Alice: { enabled, port, tokens: [{label, token, created_at}] }. */
-  config() {
-    try {
-      const raw = JSON.parse(require('node:fs').readFileSync(path.join(this.baseDir, 'public.json'), 'utf8'));
-      return { enabled: Boolean(raw.enabled), port: raw.port || DEFAULT_PORT, tokens: Array.isArray(raw.tokens) ? raw.tokens : [] };
-    } catch {
-      return { enabled: false, port: DEFAULT_PORT, tokens: [] };
-    }
-  }
-
-  saveConfig(cfg) {
-    require('node:fs').mkdirSync(this.baseDir, { recursive: true });
-    require('node:fs').writeFileSync(path.join(this.baseDir, 'public.json'), JSON.stringify(cfg, null, 2), 'utf8');
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────
@@ -124,7 +150,6 @@ class PublicServer {
 
   _route(req, res, bodyBuf) {
     this._cors(res);
-
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -132,19 +157,43 @@ class PublicServer {
       return;
     }
 
-    // Bắt buộc có token hợp lệ — trừ GET / (health, không lộ gì).
+    // Trang web chat — ai cũng mở được (form đăng nhập nằm trong trang).
     if (req.method === 'GET' && url.pathname === '/') {
-      this._json(res, 200, { name: this.alice.name, status: 'ok', version: require('../../package.json').version });
+      if (!this.webPage) {
+        this._json(res, 500, { error: 'Thiếu trang web public trong bản cài này.' });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(this.webPage.replace('__MODE__', this.config().mode));
       return;
     }
 
-    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!this._validToken(token)) {
-      this._json(res, 401, { error: 'Token không hợp lệ.' });
+    // Thông tin công khai — không cần token.
+    if (req.method === 'GET' && url.pathname === '/v1/who') {
+      this._json(res, 200, { name: this.alice.name });
       return;
     }
 
+    // Đăng nhập — mode account.
+    if (req.method === 'POST' && url.pathname === '/v1/login') {
+      this._login(res, bodyBuf);
+      return;
+    }
+
+    // Kiểm tra session còn sống (web reload không phải đăng nhập lại).
+    if (req.method === 'GET' && url.pathname === '/v1/check') {
+      const ok = this._authOk(req);
+      this._json(res, ok ? 200 : 401, ok ? { ok: true } : { error: 'Hết phiên.' });
+      return;
+    }
+
+    // Chat.
     if (req.method === 'POST' && url.pathname === '/v1/chat') {
+      const cfg = this.config();
+      if (cfg.mode === 'account' && !this._authOk(req)) {
+        this._json(res, 401, { error: 'Cần đăng nhập (hoặc token truy cập).' });
+        return;
+      }
       let payload;
       try { payload = JSON.parse(bodyBuf.toString('utf8')); } catch {
         this._json(res, 400, { error: 'Body phải là JSON { "message": "..." }.' });
@@ -162,9 +211,34 @@ class PublicServer {
     this._json(res, 404, { error: 'Không có endpoint này. Xem README: GET /, POST /v1/chat' });
   }
 
-  _validToken(token) {
+  /**
+   * Hợp lệ khi: (a) có session web còn sống, hoặc (b) có token API do chủ cấp.
+   * Mode 'anyone' không gọi hàm này cho /v1/chat.
+   */
+  _authOk(req) {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!token) return false;
+    if (this.sessions.has(token)) return true;
     return this.config().tokens.some((t) => t.token === token);
+  }
+
+  _login(res, bodyBuf) {
+    let payload;
+    try { payload = JSON.parse(bodyBuf.toString('utf8')); } catch {
+      this._json(res, 400, { error: 'Body phải là JSON { "username", "password" }.' });
+      return;
+    }
+    const username = String(payload.username || '').trim();
+    const password = String(payload.password || '');
+    const account = this.config().accounts.find((a) => a.username === username);
+    if (!account || !verifyPassword(password, account)) {
+      this._json(res, 401, { error: 'Sai tên đăng nhập hoặc mật khẩu.' });
+      return;
+    }
+    // Session mới cho mỗi lượt đăng nhập; hết hạn sau 7 ngày (đủ dùng web chat).
+    const sessionToken = crypto.randomBytes(24).toString('base64url');
+    this.sessions.set(sessionToken, { username, expires: Date.now() + 7 * 24 * 3600 * 1000 });
+    this._json(res, 200, { token: sessionToken, name: username });
   }
 
   async _chat(res, message) {
@@ -208,4 +282,4 @@ function newToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
-module.exports = { PublicServer, newToken, DEFAULT_PORT };
+module.exports = { PublicServer, newToken, hashPassword, verifyPassword, DEFAULT_PORT };

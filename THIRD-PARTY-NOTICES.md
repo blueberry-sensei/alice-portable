@@ -100,6 +100,36 @@ Phần **chạy** của brain (`runtime/brain/`, gồm Python nhúng và các g�
 
 ---
 
+## QR Code Generator
+
+`src/renderer/assets/qrcode.min.js` dùng để vẽ mã QR của link chat công khai —
+tác giả **Kazuhiko Arase**, phát hành theo **MIT**:
+
+```
+Copyright (c) 2009 Kazuhiko Arase
+URL: http://www.d-project.com/
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## Phần mềm KHÔNG nằm trong repo này
 
 Hai thứ dưới đây app cần lúc chạy nhưng **không** được commit vào repo; chúng do

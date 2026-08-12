@@ -365,7 +365,9 @@ ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
     if (enabled) {
       if (pub.running) return { ok: true };
       const cfg = pub.config();
-      if (!cfg.tokens.length) return { error: 'Chưa có token truy cập nào — tạo token trước khi public.' };
+      if (cfg.mode === 'account' && !cfg.accounts.length) {
+        return { error: 'Chế độ tài khoản cần ít nhất một tài khoản — thêm username + password trước.' };
+      }
       const p = Number(port) || cfg.port || 8931;
       await pub.start(p);
       const newCfg = pub.config();
@@ -375,6 +377,51 @@ ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
       const cfg = pub.config();
       pub.saveConfig({ ...cfg, enabled: false });
     }
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:set-mode', async (_e, id, mode) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    cfg.mode = mode === 'account' ? 'account' : 'anyone';
+    pub.saveConfig(cfg);
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:account:add', async (_e, id, { username, password }) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    const name = String(username || '').trim();
+    if (!name) return { error: 'Nhập tên đăng nhập.' };
+    if (String(password || '').length < 6) return { error: 'Mật khẩu ít nhất 6 ký tự.' };
+    if (cfg.accounts.some((a) => a.username === name)) return { error: 'Tên đăng nhập đã có.' };
+    const { hashPassword } = require('./public-server');
+    cfg.accounts.push({ username: name, ...hashPassword(password) });
+    pub.saveConfig(cfg);
+    log.info(`public account added: ${name}`);
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:account:remove', async (_e, id, username) => {
+  await bootPromise;
+  try {
+    const pub = publicServerFor(id);
+    const cfg = pub.config();
+    cfg.accounts = cfg.accounts.filter((a) => a.username !== username);
+    pub.saveConfig(cfg);
     return { ok: true };
   } catch (err) {
     return { error: String(err.message || err) };
@@ -393,11 +440,17 @@ ipcMain.handle('alice:public:info', async (_e, id) => {
         if (a.family === 'IPv4' && !a.internal) addrs.push(a.address);
       }
     }
+    const port = pub.port || cfg.port;
     return {
       enabled: pub.running,
-      port: pub.port || cfg.port,
+      mode: cfg.mode,
+      port,
       tokens: cfg.tokens,
-      urls: { local: `http://127.0.0.1:${pub.port || cfg.port}`, lan: addrs.map((ip) => `http://${ip}:${pub.port || cfg.port}`) },
+      accounts: cfg.accounts.map((a) => ({ username: a.username })),
+      // Link LAN đầu tiên là link "cho người khác" (QR dùng cái này); local là của chủ.
+      shareUrl: addrs.length ? `http://${addrs[0]}:${port}` : null,
+      localUrl: `http://127.0.0.1:${port}`,
+      lanUrls: addrs.map((ip) => `http://${ip}:${port}`),
     };
   } catch (err) {
     return { error: String(err.message || err) };
@@ -429,6 +482,14 @@ ipcMain.handle('alice:public:token:remove', async (_e, id, token) => {
   } catch (err) {
     return { error: String(err.message || err) };
   }
+});
+
+// ── tiện ích ───────────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:clipboard:write', async (_e, text) => {
+  const { clipboard } = require('electron');
+  clipboard.writeText(String(text || ''));
+  return { ok: true };
 });
 
 ipcMain.handle('alice:avatar:get', async () => {
