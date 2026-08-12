@@ -7,6 +7,29 @@ cài đặt gì thêm, không cần Docker, không cần tài khoản Claude.
 
 ---
 
+## Vừa build xong trên máy này? Chạy luôn
+
+Không phải cài gì thêm. App nằm ở:
+
+```
+dist\win-unpacked\Alice.exe
+```
+
+Bấm đúp là chạy. Muốn có lối tắt ngoài Desktop:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts\make-shortcut.ps1
+```
+
+Lần đầu mở, bấm nút **"Máy này đã cài opencode — dùng luôn chìa khoá đó"** là xong —
+máy đã cài opencode thì khỏi phải dán API key.
+
+⚠️ Mỗi lần chạy `npm run build`, thư mục `dist\win-unpacked\` bị **dọn sạch và dựng
+lại** — chìa khoá và lịch sử chat trong đó mất theo. Muốn giữ thì copy
+`dist\win-unpacked\alice-data\` ra ngoài trước khi build.
+
+---
+
 # Phần 1 — Dành cho người dùng
 
 *Nếu bạn vừa được đưa cho một thư mục tên `Alice`, đọc phần này là đủ. Không cần biết
