@@ -54,14 +54,17 @@ jobs:
         shell: bash
         run: |
           npm i --no-save opencode-ai
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN="node_modules/opencode-ai/bin/opencode.exe"
-          else
-            BIN="node_modules/opencode-ai/bin/opencode"
-          fi
-          test -f "$BIN" || { echo "Không thấy binary opencode ở $BIN"; ls -R node_modules/opencode-ai/bin || true; exit 1; }
+          # Gói opencode-ai luôn đặt binary ở bin/opencode.exe, TRÊN CẢ Linux/macOS —
+          # ".exe" chỉ là tên file cố định của gói, nội dung thật đã được optionalDependencies
+          # (opencode-linux-x64, opencode-darwin-arm64, ...) chọn đúng theo OS/CPU lúc `npm i`.
+          SRC="node_modules/opencode-ai/bin/opencode.exe"
+          test -f "$SRC" || { echo "Không thấy binary opencode ở $SRC"; ls -R node_modules/opencode-ai/bin || true; exit 1; }
           mkdir -p runtime/opencode
-          cp "$BIN" runtime/opencode/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$SRC" runtime/opencode/opencode.exe
+          else
+            cp "$SRC" runtime/opencode/opencode
+          fi
           chmod +x runtime/opencode/* || true
 
       # KHÔNG dựng brain ở đây: nó cần một container Alice Brain đang chạy, thứ
