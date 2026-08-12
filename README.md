@@ -12,11 +12,11 @@ cài đặt gì thêm, không cần Docker, không cần tài khoản Claude.
 Vào **[trang tải](https://github.com/blueberry-sensei/alice-portable/releases/latest)**
 rồi tải file hợp với máy bạn:
 
-| Máy bạn dùng | Tải file | Tình trạng |
-|---|---|---|
-| Windows | `Alice-Setup-….exe` — bấm đúp là cài | ✅ có |
-| macOS | `Alice-….dmg` — mở rồi kéo Alice vào Applications | 🚧 chưa có, xem [Lộ trình](#lộ-trình) |
-| Ubuntu / Linux | `Alice-….AppImage` — cấp quyền chạy rồi bấm đúp | 🚧 chưa có, xem [Lộ trình](#lộ-trình) |
+| Máy bạn dùng | Tải file |
+|---|---|
+| Windows | `Alice-Setup-….exe` — bấm đúp là cài |
+| macOS | `Alice-….dmg` — mở rồi kéo Alice vào Applications |
+| Ubuntu / Linux | `Alice-….AppImage` — cấp quyền chạy rồi bấm đúp |
 
 ### Hoặc dán một dòng lệnh
 
@@ -355,29 +355,29 @@ mạng bằng `ALICE_SKIP_E2E=1`. 14 test, gồm engine thật và MCP brain th�
 | `docker cp` một thư mục ra `/mnt/…` bò ~1MB/phút | 9p của WSL + hàng chục nghìn file nhỏ. Tar thành **một** file rồi giải nén bằng `tar` của Windows |
 | Khối `hidden` vẫn hiện | `display` do class đặt thắng `display:none` mà trình duyệt gán cho `[hidden]` |
 
-## Lộ trình
+## Phát hành ba hệ điều hành
 
-### macOS và Linux
+`.dmg` chỉ dựng được trên macOS, `.AppImage` chỉ dựng được trên Linux — không
+cross-build từ Windows. Nên việc đó giao cho **GitHub Actions**
+([`.github/workflows/release.yml`](.github/workflows/release.yml)): ba runner
+`windows-latest` / `macos-latest` / `ubuntu-latest`, đẩy một tag là ra cả ba file và
+tự đăng lên Releases.
 
-Mã nguồn không có gì trói vào Windows — Electron, opencode và Alice Brain đều có bản
-cho cả ba hệ. Vướng ở khâu **đóng gói**, hai chỗ:
+```bash
+npm version patch
+```
 
-1. **Không cross-build được.** `.dmg` phải dựng trên macOS, `.AppImage` phải dựng
-   trên Linux. Máy dựng hiện tại là Windows nên chỉ ra được `.exe`.
-   → Cách giải: **GitHub Actions** với ba runner (`windows-latest`, `macos-latest`,
-   `ubuntu-latest`), tag một phát ra cả ba file.
+```bash
+git push --follow-tags
+```
 
-2. **Tri thức không dựng được trên CI.** Bản seed 546 MB được bóc từ một container
-   Alice Brain đang chạy trên máy người dựng — runner của GitHub không có container
-   đó. Và kể cả có, ba bộ cài mỗi bộ ~1,9 GB thì đụng trần 2 GB/file của Releases.
-   → Cách giải: **tách tri thức thành gói tải riêng**. Bộ cài còn ~350 MB (nhẹ hơn
-   nhiều cho khách), app tải gói tri thức về ở lần chạy đầu hoặc khi người dùng bấm.
+CI có một chốt chặn cố ý: **fail nếu thấy `runtime/brain-seed` hoặc `alice-data`**
+lúc đóng gói. Bộ cài không bao giờ được mang tri thức của ai theo.
 
-Việc 2 là thay đổi thiết kế thật, không phải chỉnh cấu hình — nên nó chờ quyết định
-chứ chưa làm.
-
-Ngoài ra, `bundle-brain` hiện chỉ dựng Python cho Windows; bản macOS/Linux cần
-python-build-standalone và wheel của nền tảng tương ứng.
+CI **không** dựng phần chạy của brain (cần một container Alice Brain, runner không
+có). Người dùng mới không thiếu gì — Alice tự dựng brain rỗng ở lần chạy đầu; ai
+muốn có sẵn phần chạy của brain trong bộ cài thì dựng tay bằng `npm run build` trên
+máy mình.
 
 ### Còn thiếu
 

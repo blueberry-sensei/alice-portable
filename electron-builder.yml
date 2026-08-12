@@ -48,6 +48,26 @@ win:
     - dir
   artifactName: ${productName}-Setup-${version}.${ext}
 
+mac:
+  # `.dmg` KHÔNG cross-build từ Windows — phải dựng trên macOS. Đó là lý do có CI.
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # Chưa mua chứng chỉ Apple. Đặt `null` để electron-builder bỏ qua bước ký thay vì
+  # dựng dở rồi chết; đổi lại người dùng phải chuột phải → Open ở lần mở đầu.
+  identity: null
+
+linux:
+  # AppImage: một file, chmod +x là chạy, không cần quyền root và không phụ thuộc
+  # bản phân phối — hợp nhất cho "tải về là dùng".
+  target:
+    - AppImage
+  category: Utility
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  synopsis: Alice — trợ lý chạy trên máy của bạn
+
 nsis:
   # `oneClick: false` + cho chọn thư mục cài — `D-0054` mục 1: installer hỏi nơi cài,
   # có sẵn mặc định, không cài chui vào một chỗ cố định.
