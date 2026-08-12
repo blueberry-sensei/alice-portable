@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <!--
+    CSP chặt: renderer chỉ chạy script cùng gốc, không nạp gì từ mạng.
+    Nội dung hiển thị ở đây đến từ model và từ output của tool — tức là từ nguồn
+    KHÔNG đáng tin. Không có 'unsafe-inline' cho script, và mọi thứ đi vào DOM đều
+    qua bộ escape ở app.js.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none';">
+  <title>Alice</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="sky" aria-hidden="true">
+    <div class="dots"></div>
+    <i style="top:60px; left:12%; color:#9B6BFF; font-size:20px; animation:twinkle 3.2s ease-in-out infinite">✦</i>
+    <i style="top:240px; left:46%; color:#FFFFFF; font-size:13px; animation:twinkle 4s .6s ease-in-out infinite">✦</i>
+    <i style="top:120px; right:18%; color:#7EC8FF; font-size:16px; animation:twinkle 3.6s 1.1s ease-in-out infinite">✧</i>
+    <i style="bottom:120px; left:8%; color:#9B6BFF; font-size:15px; animation:twinkle 4.4s .3s ease-in-out infinite">✧</i>
+    <i style="bottom:60px; right:26%; color:#FFFFFF; font-size:12px; animation:twinkle 3s .9s ease-in-out infinite">✦</i>
+    <div class="shoot" style="top:-40px; left:6%"></div>
+  </div>
+
+  <div class="app">
+    <div class="chat">
+      <div class="head">
+        <!-- Ảnh nạp bằng JS (data URI) chứ không đặt src sẵn: ảnh của người dùng
+             nằm ở alice-data/, ngoài thư mục app, nên file:// không qua được CSP. -->
+        <div class="ava">
+          <div class="ring"></div>
+          <div class="face"><img id="ava-img" alt="Alice"></div>
+        </div>
+        <div class="who">
+          <div class="name">Alice <span class="star">★</span></div>
+          <div class="sub" id="subtitle">đang khởi động…</div>
+        </div>
+        <button class="icon-btn" id="btn-search" title="Tìm trong lịch sử chat">⌕</button>
+        <button class="icon-btn" id="btn-settings" title="Cài đặt">⚙</button>
+      </div>
+
+      <div class="pinned" id="pinned" hidden>
+        <div class="mark">★</div>
+        <div style="flex:1; min-width:0">
+          <div class="title" id="pinned-title">Trạng thái</div>
+          <div class="body" id="pinned-body"></div>
+        </div>
+      </div>
+
+      <div class="feed" id="feed">
+        <div class="hello" id="hello">
+          <div class="art"><img id="hello-img" alt=""></div>
+          <div class="logo">Alice</div>
+          <div class="tag">PORTABLE</div>
+          <div class="say">Chào bạn, mình có thể giúp gì? ✦</div>
+        </div>
+      </div>
+
+      <div class="compose">
+        <div class="pill">
+          <textarea id="input" rows="1" placeholder="Nhắn cho Alice…" autofocus></textarea>
+        </div>
+        <button class="send" id="send" title="Gửi (Enter)">➤</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet" id="sheet">
+    <div class="card">
+      <h2 id="sheet-title">Cài đặt</h2>
+      <div class="hint" id="sheet-hint"></div>
+      <div id="sheet-body"></div>
+      <div class="btn-row">
+        <button class="btn ghost" id="sheet-close">Đóng</button>
+        <button class="btn" id="sheet-save" hidden>Lưu</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

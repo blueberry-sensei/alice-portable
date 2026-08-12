@@ -1,0 +1,48 @@
+appId: digital.kyanon.alice.portable
+productName: Alice
+copyright: Alice — bản portable
+
+directories:
+  output: dist
+  buildResources: build
+
+# `asar: true` gói mã app thành một file — khởi động nhanh hơn và không để lộ nguồn
+# thành một cây file rời. `runtime/` PHẢI nằm ngoài asar: python nhúng và binary
+# opencode là tiến trình con, mà không ai spawn được một file nằm trong asar.
+asar: true
+
+files:
+  - src/**/*
+  - knowledge/**/*
+  - package.json
+  - '!**/*.map'
+  - '!test/**/*'
+  - '!scripts/**/*'
+  - '!dream-src/**/*'
+
+extraResources:
+  - from: runtime
+    to: runtime
+    filter:
+      - '**/*'
+      # Rác của lần cài trước: bytecode Linux docker cp mang sang, cache pip, và
+      # test của thư viện. Không cái nào chạy trên máy người dùng.
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+      - '!**/pip/**'
+      - '!**/tests/**'
+      - '!**/test/**'
+
+win:
+  # `dir` là target THẬT SỰ dùng được cho bản này: brain nhúng gần 900MB, mà target
+  # `portable` gói tất cả vào một .exe tự giải nén — mỗi lần chạy là một lần bung
+  # gần 1GB ra %TEMP%. Một thư mục mang đi được thì vừa portable vừa mở là chạy.
+  target:
+    - dir
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# Nén `store`: nhanh hơn nhiều lúc build, và phần nặng nhất (wheel Python) vốn đã
+# là dữ liệu nén sẵn nên nén lại gần như không giảm được bao nhiêu.
+compression: store
+
+publish: null

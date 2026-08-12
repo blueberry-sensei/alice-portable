@@ -1,0 +1,17 @@
+node_modules/
+dist/
+
+# Runtime nhúng: ~1GB binary (python embeddable + wheel + opencode.exe). Dựng lại
+# bằng `npm run bundle:brain`, không commit vào git.
+runtime/
+
+# Dữ liệu của máy này: lịch sử chat, brain, API key, session opencode.
+# Không bao giờ commit — trong đây có credential thật.
+alice-data/
+
+# Bản bóc từ "DREAM Design System.html". Sinh lại bằng tools/unbundle_dream.py;
+# asset dùng thật đã nằm ở src/renderer/assets/.
+dream-src/
+
+# Ảnh chụp lúc nghiệm thu. `docs/` KHÔNG bị bỏ qua — ảnh trong README nằm ở đó.
+.shot*.png
