@@ -15,6 +15,7 @@ const auth = require('./engine/auth');
 const avatar = require('./avatar');
 const { BrainSidecar } = require('./brain/sidecar');
 const { Scheduler } = require('./scheduler');
+const { Updater } = require('./updater');
 
 let win = null;
 let store = null;
@@ -30,6 +31,9 @@ let scheduler = null;
 // không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
 // (nút "Tắt Alice" trong app, hoặc quit hệ thống) để cho đóng hẳn.
 let isQuitting = false;
+
+// Kiểm tra bản mới chạy NỀN sau khi boot — lỗi mạng thì im lặng, không đứng hình.
+const updater = new Updater();
 
 /**
  * `boot()` và việc nạp trang chạy SONG SONG, nên không được giả định cái nào xong
@@ -192,6 +196,7 @@ ipcMain.handle('alice:status', async () => {
     settings,
     conversation: store.currentConversation(),
     messageCount: store.count(),
+    update: updater.status(),
   };
 });
 
@@ -269,6 +274,16 @@ ipcMain.handle('alice:models', async () => {
   } catch (err) {
     return { models: [], error: String(err.message || err) };
   }
+});
+
+// ── cập nhật ───────────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:update:check', async () => updater.check(app.getVersion()));
+
+ipcMain.handle('alice:update:open', async (_e, url) => {
+  const target = url || updater.status().url || 'https://github.com/blueberry-sensei/alice-portable/releases/latest';
+  shell.openExternal(target);
+  return { ok: true };
 });
 
 // ── cuộc trò chuyện ────────────────────────────────────────────────────────
@@ -403,6 +418,11 @@ if (!app.requestSingleInstanceLock()) {
       await bootPromise;
       log.info('boot done — ready');
       if (win) win.webContents.send('alice:ready');
+      // Check bản mới KHÔNG chặn boot: chạy nền, banner hiện khi nào có kết quả.
+      updater.check(app.getVersion()).then((u) => {
+        log.info(`update check: ${u.hasUpdate ? `new version ${u.latest}` : 'up to date'}`);
+        if (win) win.webContents.send('alice:update', u);
+      });
     } catch { /* đã báo ra UI ở trên rồi */ }
   });
 

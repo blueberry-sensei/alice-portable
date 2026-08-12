@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('alice', {
   schedRemove: (id) => ipcRenderer.invoke('alice:sched:remove', id),
   shutdown: () => ipcRenderer.invoke('alice:shutdown'),
 
+  // Cập nhật: kiểm tra + mở trang tải (không tự tải/cài — chốt của Bệ hạ).
+  updateCheck: () => ipcRenderer.invoke('alice:update:check'),
+  updateOpen: (url) => ipcRenderer.invoke('alice:update:open', url),
+  onUpdate: (cb) => ipcRenderer.on('alice:update', (_e, status) => cb(status)),
+
   onStream: (cb) => ipcRenderer.on('alice:stream', (_e, payload) => cb(payload)),
   onReady: (cb) => ipcRenderer.on('alice:ready', () => cb()),
   onBusy: (cb) => ipcRenderer.on('alice:busy', (_e, msg) => cb(msg)),
