@@ -19,11 +19,14 @@
 # `param()` PHẢI đứng trước mọi câu lệnh (chú thích không tính).
 param(
   # Nguồn lấy code brain:
-  #   github   (mặc định) — clone alice-brain + alice-core từ GitHub, dùng cho CI
-  #   container            — copy từ một container Alice Brain đang chạy (cách cũ)
-  #   local                — copy từ thư mục đã có sẵn hai repo (phát triển nhanh)
-  [ValidateSet('github', 'container', 'local')]
-  [string]$Source = 'github',
+  #   vendor   (mặc định) — copy từ `brain-source/` ngay trong repo này. alice-brain
+  #             và alice-core là repo PRIVATE nên CI public không clone được; nguồn
+  #             được vendor vào repo bằng `npm run brain:sync-source`. Dùng cho CI.
+  #   github              — clone alice-brain + alice-core từ GitHub (cần quyền đọc).
+  #   container           — copy từ một container Alice Brain đang chạy (cách cũ).
+  #   local               — copy từ thư mục đã có sẵn hai repo (phát triển nhanh).
+  [ValidateSet('vendor', 'github', 'container', 'local')]
+  [string]$Source = 'vendor',
 
   # Tên container brain đang chạy khi -Source container. KHÔNG ghi cứng: mỗi người
   # dựng brain của mình với một tên khác, và một script chỉ chạy được trên đúng
@@ -64,7 +67,7 @@ if ($winOs) {
   $pyExe = Join-Path $pyDir 'python.exe'
   if (-not (Test-Path $pyExe)) {
     Write-Output "[1/5] Tải Python $pyVersion embeddable…"
-    $zip = Join-Path $env:TEMP "python-embed-$pyVersion.zip"
+    $zip = Join-Path ([System.IO.Path]::GetTempPath()) "python-embed-$pyVersion.zip"
     if (-not (Test-Path $zip)) {
       Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 `
         -Uri "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-embed-amd64.zip" -OutFile $zip
@@ -115,7 +118,7 @@ if ($winOs) {
   $hasPip = Test-Path (Join-Path $pyDir 'Lib/site-packages/pip')
   if (-not $hasPip) {
     Write-Output "[2/5] Cài pip…"
-    $getpip = Join-Path $env:TEMP 'get-pip.py'
+    $getpip = Join-Path ([System.IO.Path]::GetTempPath()) 'get-pip.py'
     if (-not (Test-Path $getpip)) {
       Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile $getpip
     }
@@ -137,8 +140,18 @@ function Copy-SourceDir([string]$src, [string]$dst) {
   if (-not (Test-Path $target)) { throw "Copy hỏng: $src → $target" }
 }
 
-if ($Source -eq 'github') {
-  $srcDir = Join-Path $env:TEMP "alice-bundle-src-$Ref"
+if ($Source -eq 'vendor') {
+  # Nguồn nằm ngay trong repo (xem sync-brain-source.ps1) — không mạng, không auth.
+  $vendorDir = Join-Path $root 'brain-source'
+  foreach ($name in @('sag_api', 'sag_agent', 'alicecore')) {
+    $srcDir = Join-Path $vendorDir $name
+    if (-not (Test-Path $srcDir)) { throw "Thiếu $srcDir — chạy `npm run brain:sync-source` trước." }
+    Copy-SourceDir $srcDir $name
+  }
+} elseif ($Source -eq 'github') {
+  # KHÔNG dùng $env:TEMP: biến đó không tồn tại trong pwsh trên macOS/Linux
+  # (ở đó là $env:TMPDIR) — dùng GetTempPath() của .NET, đúng trên mọi OS.
+  $srcDir = Join-Path ([System.IO.Path]::GetTempPath()) "alice-bundle-src-$Ref"
   New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
   foreach ($repo in @('alice-brain', 'alice-core')) {
     $repoDir = Join-Path $srcDir $repo

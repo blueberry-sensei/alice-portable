@@ -1,0 +1,6 @@
+﻿Nguồn brain đóng băng cho bản portable — KHÔNG sửa tay.
+Sau khi alice-brain / alice-core đổi, chạy:  npm run brain:sync-source
+
+alice-brain: b46259c2a2b549d22ff63a18507a244d70d18802
+alice-core:  69b92bac18b211eed5cb9199a32d2cc2e0be56b5
+sync lúc:    2026-08-13 00:32

@@ -14,6 +14,7 @@
     "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/make-shortcut.ps1",
     "bundle:opencode": "powershell -ExecutionPolicy Bypass -File scripts/bundle-opencode.ps1",
     "bundle:brain": "powershell -ExecutionPolicy Bypass -File scripts/bundle-brain.ps1",
+    "brain:sync-source": "powershell -ExecutionPolicy Bypass -File scripts/sync-brain-source.ps1",
     "import:brain-data": "powershell -ExecutionPolicy Bypass -File scripts/import-brain-data.ps1",
     "assets": "node scripts/build-assets.js"
   },

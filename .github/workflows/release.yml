@@ -47,7 +47,9 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      # Electron binary tải từ GitHub releases; runner đôi khi dính 503/hang mạng
+      # (đã gặp 2 lần trong 3 vòng). Tăng retry để không fail vì lỗi nhất thời.
+      - run: npm ci --fetch-retries=6 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 
       # Nhúng binary opencode. CI không có sẵn nên tải từ npm rồi trỏ script vào.
       - name: Nhúng opencode
@@ -70,12 +72,13 @@ jobs:
       # Nhúng phần CHẠY của brain (Python + thư viện), KHÔNG nhúng tri thức — brain
       # rỗng tự dựng ở lần chạy đầu. Feedback khách 2026-08-12: bản phát cho khách
       # phải có sẵn recall, không phải bản "chat mà không tra được tri thức".
-      # `bundle-brain.ps1 -Source github` lấy sag_api/sag_agent/alicecore từ GitHub
-      # nên runner không cần container Alice Brain.
+      # `bundle-brain.ps1 -Source vendor` lấy nguồn từ `brain-source/` ngay trong
+      # repo (alice-brain/alice-core là private nên không clone được từ CI public;
+      # sync bằng `npm run brain:sync-source` trước mỗi release).
       - name: Nhúng brain (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/bundle-brain.ps1 -Source github
+        run: ./scripts/bundle-brain.ps1 -Source vendor
 
       # macOS/Linux: pwsh có sẵn trên runner; python3.12 do setup-python cung cấp —
       # script copy nguyên cây python vào runtime rồi cài wheel đúng hệ điều hành.
@@ -88,7 +91,7 @@ jobs:
       - name: Nhúng brain (macOS / Linux — bundle)
         if: runner.os != 'Windows'
         shell: pwsh
-        run: ./scripts/bundle-brain.ps1 -Source github
+        run: ./scripts/bundle-brain.ps1 -Source vendor
 
       - name: Kiểm bộ cài không lẫn tri thức của ai
         shell: bash

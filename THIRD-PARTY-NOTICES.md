@@ -83,6 +83,23 @@ năng *Cài đặt → Đổi ảnh…* trong app, ảnh riêng lưu ngoài repo
 
 ---
 
+## Alice Brain — nguồn trong `brain-source/`
+
+Từ bản 0.1.3, nguồn thuần Python của Alice Brain được **vendor vào repo** tại
+[`brain-source/`](brain-source/README.md) (`sag_api`, `sag_agent`, `alicecore`),
+copy từ hai repo `blueberry-sensei/alice-brain` và `blueberry-sensei/alice-core`.
+Cả hai phát hành theo **MIT** với hai dòng bản quyền:
+
+```
+Copyright (c) 2026 Blueberry Sensei
+Copyright (c) 2026 [tác giả kế thừa — xem LICENSE của từng repo]
+```
+
+Phần **chạy** của brain (`runtime/brain/`, gồm Python nhúng và các gói PyPI) vẫn
+được đóng gói vào lúc build và KHÔNG nằm trong repo — xem mục dưới.
+
+---
+
 ## Phần mềm KHÔNG nằm trong repo này
 
 Hai thứ dưới đây app cần lúc chạy nhưng **không** được commit vào repo; chúng do

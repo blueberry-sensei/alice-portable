@@ -185,9 +185,17 @@ npm run bundle:opencode
 npm run build
 ```
 
-`npm run build` **tự nhúng cả brain**: `bundle-brain.ps1 -Source github` lấy
-`sag_api` + `sag_agent` + `alicecore` (đều thuần Python) từ GitHub rồi cài phần
-native bằng wheel đúng hệ điều hành — không cần Docker, không cần container.
+`npm run build` **tự nhúng cả brain**: `bundle-brain.ps1 -Source vendor` lấy
+`sag_api` + `sag_agent` + `alicecore` (đều thuần Python) từ `brain-source/` ngay
+trong repo rồi cài phần native bằng wheel đúng hệ điều hành — không cần Docker,
+không cần quyền đọc hai repo nguồn (chúng là private; xem
+[`brain-source/README.md`](brain-source/README.md)). Nguồn đó **đóng băng theo
+release**: sau khi Alice Brain đổi, chạy lại lệnh này trước khi build:
+
+```bash
+npm run brain:sync-source
+```
+
 Bước này chỉ nhúng **phần chạy** của brain, **không** nhúng tri thức. `npm run build`
 ra hai thứ trong `dist\`:
 
@@ -196,13 +204,12 @@ ra hai thứ trong `dist\`:
 | `Alice-Setup-<ver>.exe` | **Người dùng cuối** — bấm đúp là cài. Đây là thứ upload lên Releases |
 | `win-unpacked\` | Ai muốn bản mang đi được (USB), hoặc không có quyền cài |
 
-Muốn dựng brain từ **brain đang chạy của chính mình** (không phải từ GitHub) thì dùng
-`npm run bundle:brain` — tức `bundle-brain.ps1 -Source container` (cần Docker + một
-Alice Brain đang chạy):
+Muốn dựng brain từ **brain đang chạy của chính mình** (không phải từ `brain-source/`)
+thì dùng `bundle-brain.ps1 -Source container` (cần Docker + một Alice Brain đang chạy):
 
 ```bash
 set ALICE_BRAIN_CONTAINER=ten-container-brain-cua-ban
-npm run bundle:brain
+powershell -ExecutionPolicy Bypass -File scripts\bundle-brain.ps1 -Source container
 ```
 
 ## Tri thức: Alice bắt đầu từ con số không
@@ -339,7 +346,8 @@ mạng bằng `ALICE_SKIP_E2E=1`. 14 test, gồm engine thật và MCP brain th�
 | `npm test` | Toàn bộ test |
 | `npm run assets` | Sinh lại font từ file design system |
 | `npm run bundle:opencode` | Nhúng binary opencode |
-| `npm run bundle:brain` | Nhúng Alice Brain |
+| `npm run bundle:brain` | Nhúng Alice Brain (nguồn từ `brain-source/`) |
+| `npm run brain:sync-source` | Đồng bộ nguồn brain mới từ hai repo nguồn |
 | `npm run import:brain-data` | Nạp tri thức vào brain nhúng |
 | `npm run build` | Đóng gói |
 

@@ -1,0 +1,1109 @@
+"""
+Atomic event retriever
+
+A vector retriever built on triples (subject-relation-object).
+It retrieves atomic events holding exactly two entities and supports a hybrid title + content search.
+
+Usage example:
+    from alicecore.modules.search import AtomicSearcher, AtomicConfig
+
+    config = AtomicConfig(
+        atomic_top_k=20,
+        similarity_threshold=0.4
+    )
+
+    searcher = AtomicSearcher()
+    results = await searcher.search(
+        query="the Haier group's rendanheyi model",
+        source_config_ids=["source_1", "source_2"],
+        config=config
+    )
+"""
+
+import time
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import select
+
+from alicecore.core.ai.factory import create_llm_client
+from alicecore.core.ai.models import LLMMessage, LLMRole
+from alicecore.core.storage.client import get_es_client
+from alicecore.core.storage.repositories.entity_repository import EntityVectorRepository
+from alicecore.core.storage.repositories.event_repository import EventVectorRepository
+from alicecore.core.storage.repositories.source_chunk_repository import SourceChunkRepository
+from alicecore.db import EventEntity, SourceChunk, SourceEvent, get_session_factory
+from alicecore.modules.load.processor import DocumentProcessor
+from alicecore.modules.search.config import AtomicConfig
+from alicecore.utils import get_logger
+from alicecore.utils.token_counter import TokenCounter
+
+logger = get_logger("search.atomic")
+
+
+@dataclass
+class _SearchState:
+    """Per-search mutable state used by entity/relation expansion.
+
+    Holds the deduplication sets of one search() call, isolated by a ContextVar so a shared
+    AtomicSearcher singleton cannot let concurrent queries pollute each other's state.
+    """
+
+    entity_ids: set = field(default_factory=set)
+    relation_ids: set = field(default_factory=set)
+
+
+_atomic_search_state_var: ContextVar[Optional[_SearchState]] = ContextVar(
+    "atomic_search_state",
+    default=None,
+)
+
+# NER prompt (HippoRAG style)
+_NER_SYSTEM_PROMPT = "You're a very effective entity extraction system."
+
+_NER_ONE_SHOT_INPUT = """Please extract all named entities that are important for solving the questions below.
+Place the named entities in json format.
+
+Question: Which magazine was started first Arthur's Magazine or First for Women?
+"""
+
+_NER_ONE_SHOT_OUTPUT = """{"named_entities": ["First for Women", "Arthur's Magazine"]}"""
+
+_NER_TEMPLATE = "Question: {}"
+
+# Rerank prompt (HippoRAG style)
+_RERANK_SYSTEM_PROMPT = """I will provide you with a set of relationship descriptions from a knowledge graph. \
+Select exactly {top_k} relationships most useful for answering this multi-hop question.
+
+Return JSON with "thought_process" and "useful_relations" (list of {top_k} relation lines, most useful first)."""
+
+_RERANK_EXAMPLE_1_INPUT = """I will provide you with a set of relationship descriptions from a knowledge graph. \
+Select exactly 5 relationships most useful for answering this multi-hop question.
+
+Return JSON with "thought_process" and "useful_relations" (list of 5 relation lines, most useful first).
+
+Question:
+When did Lothair Ii's mother die?
+
+Relationship descriptions:
+[53] bertha married to theobald of arles
+[54] bertha married to adalbert ii of tuscany
+[42] lothair ii son of ermengarde of tours
+[43] lothair ii married to teutberga
+[41] lothair ii son of emperor lothair i
+[60] lothair ii husband of waldrada
+[67] waldrada was mistress of lothair ii
+"""
+
+_RERANK_EXAMPLE_1_OUTPUT = """{"thought_process": "2-hop question: First find Lothair II's mother (relation [42]: Ermengarde of Tours), \
+then find death date. [41] gives father for family context.", \
+"useful_relations": ["[42]", "[41]", "[43]", "[60]", "[67]"]}"""
+
+_RERANK_EXAMPLE_2_INPUT = """I will provide you with a set of relationship descriptions from a knowledge graph. \
+Select exactly 5 relationships most useful for answering this multi-hop question.
+
+Return JSON with "thought_process" and "useful_relations" (list of 5 relation lines, most useful first).
+
+Question:
+What country is the composer of "Erta Eterna" from?
+
+Relationship descriptions:
+[12] terra eterna composed by paulo flores
+[15] paulo flores born in angola
+[18] paulo flores genre is semba
+[22] angola located in africa
+[25] semba originated in angola
+[30] paulo flores nationality angolan
+"""
+
+_RERANK_EXAMPLE_2_OUTPUT = """{"thought_process": "2-hop question: First find composer of Terra Eterna ([12]: Paulo Flores), \
+then find his country ([15] born in Angola or [30] nationality Angolan).", \
+"useful_relations": ["[12]", "[15]", "[30]", "[22]", "[25]"]}"""
+
+_RERANK_EXAMPLE_3_INPUT = """I will provide you with a set of relationship descriptions from a knowledge graph. \
+Select exactly 5 relationships most useful for answering this multi-hop question.
+
+Return JSON with "thought_process" and "useful_relations" (list of 5 relation lines, most useful first).
+
+Question:
+Who is the director of the film that won the award also won by "The Hurt Locker"?
+
+Relationship descriptions:
+[5] the hurt locker won academy award best picture
+[8] the hurt locker directed by kathryn bigelow
+[12] moonlight won academy award best picture
+[15] moonlight directed by barry jenkins
+[20] la la land won golden globe best musical
+[25] barry jenkins born in miami
+"""
+
+_RERANK_EXAMPLE_3_OUTPUT = """{"thought_process": "3-hop question: (1) Find award won by The Hurt Locker ([5]: Academy Award Best Picture), \
+(2) Find another film with same award ([12]: Moonlight), (3) Find director ([15]: Barry Jenkins).", \
+"useful_relations": ["[5]", "[12]", "[15]", "[8]", "[25]"]}"""
+
+_RERANK_TEMPLATE = """Question:
+{question}
+
+Relationship descriptions:
+{relations}
+"""
+
+
+class AtomicSearcher:
+    """
+    Atomic event retriever
+
+    Retrieves atomised triple events (each event holds exactly 2 entities).
+    """
+
+    def __init__(self, token_counter: Optional[TokenCounter] = None):
+        self._llm_client = None
+        self._processor = None
+        self._entity_repo = None
+        self.token_counter = token_counter or TokenCounter()
+
+    def _get_search_state(self) -> _SearchState:
+        state = _atomic_search_state_var.get()
+        if state is None:
+            state = _SearchState()
+            _atomic_search_state_var.set(state)
+        return state
+
+    @property
+    def _entity_ids(self) -> set:
+        return self._get_search_state().entity_ids
+
+    @_entity_ids.setter
+    def _entity_ids(self, value: set) -> None:
+        self._get_search_state().entity_ids = value
+
+    @property
+    def _relation_ids(self) -> set:
+        return self._get_search_state().relation_ids
+
+    @_relation_ids.setter
+    def _relation_ids(self, value: set) -> None:
+        self._get_search_state().relation_ids = value
+
+    async def _get_llm_client(self):
+        if self._llm_client is None:
+            self._llm_client = await create_llm_client(scenario="search")
+        return self._llm_client
+
+    def _get_entity_repo(self) -> EntityVectorRepository:
+        if self._entity_repo is None:
+            self._entity_repo = EntityVectorRepository(get_es_client())
+        return self._entity_repo
+
+    async def _get_processor(self) -> DocumentProcessor:
+        if self._processor is None:
+            llm_client = await self._get_llm_client()
+            self._processor = DocumentProcessor(llm_client=llm_client)
+        return self._processor
+
+    async def step1_extract_entities(self, query: str) -> List[str]:
+        """
+        Step1: extract the named entities from the query
+
+        Args:
+            query: the user query text
+
+        Returns:
+            The entity name list, for example ["Haier group", "rendanheyi"]
+        """
+        llm_client = await self._get_llm_client()
+
+        messages = [
+            LLMMessage(role=LLMRole.SYSTEM, content=_NER_SYSTEM_PROMPT),
+            LLMMessage(role=LLMRole.USER, content=_NER_ONE_SHOT_INPUT),
+            LLMMessage(role=LLMRole.ASSISTANT, content=_NER_ONE_SHOT_OUTPUT),
+            LLMMessage(role=LLMRole.USER, content=_NER_TEMPLATE.format(query)),
+        ]
+
+        response = await llm_client.chat_with_schema(
+            messages,
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "named_entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["named_entities"],
+            },
+        )
+
+        # Record the token consumption
+        if hasattr(response, "usage"):
+            usage = response.usage
+            self.token_counter.add_record(
+                scenario="atomic_ner",
+                model=getattr(response, "model", "unknown"),
+                input_tokens=usage.prompt_tokens,
+                output_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                metadata={"query": query},
+            )
+
+        entities = response.get("named_entities", response.get("entities", []))
+        entities = [str(e).strip() for e in entities if e]
+
+        logger.info(f"[Step1 entity extraction] query='{query}' -> entities={entities}")
+        return entities
+
+    async def step2_retrieve_entities(
+        self,
+        query_entities: List[str],
+        source_config_ids: List[str],
+        entity_top_k: Optional[int] = None,
+        key_similarity_threshold: Optional[float] = None,
+    ) -> Tuple[List[str], List[str], List[float]]:
+        """
+        Step2: search ES for entities similar to the names Step1 extracted
+
+        Each query entity finds at most entity_top_k matches, and the similarity must be >= key_similarity_threshold.
+
+        Args:
+            query_entities: the entity name list Step1 extracted
+            source_config_ids: source ID list
+            entity_top_k: how many to retrieve per query entity (AtomicConfig by default)
+            key_similarity_threshold: the minimum entity similarity (AtomicConfig by default)
+
+        Returns:
+            (entity_ids, entity_names, scores) as a deduplicated triple
+        """
+        if not query_entities:
+            return [], [], []
+
+        config = AtomicConfig()
+        top_k = entity_top_k or config.entity_top_k
+        threshold = key_similarity_threshold if key_similarity_threshold is not None else config.key_similarity_threshold
+
+        processor = await self._get_processor()
+        repo = self._get_entity_repo()
+
+        # Generate the vectors of the query entities in batch
+        embeddings = [await processor.generate_embedding(name) for name in query_entities]
+
+        # One kNN search per entity, then aggregate and deduplicate
+        entity_ids: List[str] = []
+        entity_names: List[str] = []
+        scores: List[float] = []
+        seen: set = set()
+
+        for vec in embeddings:
+            results = await repo.search_similar(
+                query_vector=vec,
+                k=top_k,
+                source_config_ids=source_config_ids,
+            )
+            for hit in results:
+                score = hit.get("_score", 0.0)
+                if score < threshold:
+                    continue
+                eid = hit.get("entity_id", "")
+                if eid and eid not in seen:
+                    seen.add(eid)
+                    entity_ids.append(eid)
+                    entity_names.append(hit.get("name", ""))
+                    scores.append(score)
+                    self._entity_ids.add(eid)
+
+        logger.info(
+            f"[Step2 entity search] query_entities={query_entities} -> "
+            f"retrieved {len(entity_ids)} entities, "
+            f"top_scores={scores[:5] if scores else []}"
+        )
+        return entity_ids, entity_names, scores
+
+    async def step3_retrieve_events(
+        self,
+        query: str,
+        source_config_ids: List[str],
+        entity_ids: Optional[List[str]] = None,
+        atomic_top_k: int = 20,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Step3: dual-channel recall + deduplicated merge
+
+        Channel 1 (entity->event): entity_ids -> EventEntity (unbounded)
+        Channel 2 (query->event): the query embedding -> content_vector kNN (capped at atomic_top_k)
+
+        The two channels are merged and deduplicated by event_id, returning only event_id and score.
+
+        Args:
+            query: the query text
+            source_config_ids: source ID list
+            entity_ids: the entity IDs Step2 found (optional, feeds channel 1)
+            atomic_top_k: the channel 2 query->event cap
+            similarity_threshold: the minimum channel 2 vector similarity
+
+        Returns:
+            [{"event_id": str, "score": float}, ...]
+        """
+        config = AtomicConfig()
+        threshold = similarity_threshold if similarity_threshold is not None else config.similarity_threshold
+
+        merged: Dict[str, float] = {}
+
+        # --- Channel 1: entity -> event (a DB query, unbounded) ---
+        if entity_ids:
+            session_factory = get_session_factory()
+
+            async with session_factory() as session:
+                stmt = select(EventEntity.event_id).where(
+                    EventEntity.entity_id.in_(entity_ids)
+                )
+                if source_config_ids:
+                    stmt = stmt.join(
+                        SourceEvent, SourceEvent.id == EventEntity.event_id
+                    ).where(
+                        SourceEvent.source_config_id.in_(source_config_ids)
+                    )
+                result = await session.execute(stmt)
+                for row in result.fetchall():
+                    merged[row[0]] = 0.0
+
+        # --- Channel 2: query -> event (an ES vector search, capped at atomic_top_k) ---
+        processor = await self._get_processor()
+        query_vector = await processor.generate_embedding(query)
+
+        event_repo = EventVectorRepository(get_es_client())
+
+        es_results = await event_repo.search_similar_by_title(
+            query_vector=query_vector,
+            k=atomic_top_k * 3,
+            source_config_ids=source_config_ids,
+        )
+
+        db_count = 0
+        es_new_count = 0
+        es_count = 0
+
+        for hit in es_results:
+            if es_count >= atomic_top_k:
+                break
+
+            score = hit.get("_score", 0.0)
+            if score < threshold:
+                continue
+
+            eid = hit.get("event_id", "")
+            if not eid:
+                continue
+
+            if eid not in merged:
+                es_new_count += 1
+            merged[eid] = score
+            es_count += 1
+
+        db_count = len(merged) - es_new_count
+        items = [{"event_id": eid, "score": score} for eid, score in merged.items()]
+
+        logger.info(
+            f"[Step3 dual-channel recall] query='{query}' -> "
+            f"entity→event={db_count}, query→event={es_new_count}, "
+            f"merged={len(items)}"
+        )
+        return items
+
+    async def step4_fetch_event_details(
+        self,
+        event_ids: List[str],
+    ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, List[str]]]:
+        """
+        Step4: read the event details and the related entities (read only, the Set is not updated)
+
+        Args:
+            event_ids: the event ID list
+
+        Returns:
+            (event_details, event_entities):
+            - event_details: {event_id: {"title": str, "content": str}}
+            - event_entities: {event_id: [entity_id, entity_id, ...]}
+        """
+        if not event_ids:
+            return {}, {}
+
+        session_factory = get_session_factory()
+        event_details: Dict[str, Dict[str, str]] = {}
+        event_entities: Dict[str, List[str]] = {}
+
+        async with session_factory() as session:
+            events_stmt = select(SourceEvent).where(
+                SourceEvent.id.in_(event_ids)
+            )
+            result = await session.execute(events_stmt)
+            for event in result.scalars().all():
+                event_details[event.id] = {
+                    "title": event.title or "",
+                    "content": event.content or "",
+                }
+
+            ee_stmt = select(EventEntity.event_id, EventEntity.entity_id).where(
+                EventEntity.event_id.in_(event_ids)
+            )
+            result = await session.execute(ee_stmt)
+            for row in result.fetchall():
+                eid, kid = row[0], row[1]
+                if eid not in event_details:
+                    continue
+                if eid not in event_entities:
+                    event_entities[eid] = []
+                event_entities[eid].append(kid)
+
+        logger.info(
+            f"[Step4 event details] input_event_ids={len(event_ids)}, "
+            f"found_events={len(event_details)}, "
+            f"event_entity_relations={sum(len(v) for v in event_entities.values())}"
+        )
+        return event_details, event_entities
+
+    def get_new_entity_ids(self, event_entities: Dict[str, List[str]]) -> List[str]:
+        """
+        Find the entity IDs in event_entities that have not appeared in self._entity_ids
+
+        Used during expansion to spot new entities and decide whether another round is needed.
+
+        Args:
+            event_entities: {event_id: [entity_id, ...]}
+
+        Returns:
+            The new entity ID list (deduplicated)
+        """
+        all_ids = set()
+        for entity_ids in event_entities.values():
+            all_ids.update(entity_ids)
+        new_ids = all_ids - self._entity_ids
+        logger.info(
+            f"[dedup] total={len(all_ids)}, "
+            f"already_tracked={len(all_ids) - len(new_ids)}, "
+            f"new={len(new_ids)}"
+        )
+        return list(new_ids)
+
+    async def step5_expand(
+        self,
+        event_entities: Dict[str, List[str]],
+        source_config_ids: Optional[List[str]] = None,
+        max_hops: Optional[int] = None,
+    ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, List[str]]]:
+        """
+        Step5: multi-hop expansion
+
+        Logic:
+          hop=0: entity_set = the Step2 entities, relation_set = the Step3 merged events
+          hop=N: prev_hop_entities -> new keys (not in entity_set)
+                 new keys -> new relations (not in relation_set)
+                 update both sets, prev_hop_entities = the entities of this hop's new events
+
+        Args:
+            event_entities: the {event_id: [entity_id, ...]} map Step4 returned
+            source_config_ids: source ID list (optional)
+            max_hops: the maximum hop count (AtomicConfig by default)
+
+        Returns:
+            (all_details, all_entities) the details and entity dictionaries accumulated over every round
+        """
+        config = AtomicConfig()
+        max_hops = max_hops if max_hops is not None else config.max_hops
+
+        all_details: Dict[str, Dict[str, str]] = {}
+        all_entities: Dict[str, List[str]] = {}
+
+        # hop=0: initialise relation_set (entity_set was already filled by step2)
+        self._relation_ids.update(event_entities.keys())
+
+        if max_hops == 0:
+            return all_details, all_entities
+
+        # The previous hop's event_entities, used to spot new keys each round
+        prev_hop_entities = event_entities
+
+        for hop in range(max_hops):
+            pre_events = len(self._relation_ids)
+            pre_entities = len(self._entity_ids)
+
+            # 1. Find the new keys in the previous hop's events (not in entity_set)
+            new_entity_ids = self.get_new_entity_ids(prev_hop_entities)
+
+            if not new_entity_ids:
+                logger.info(
+                    f"[Step5 expansion] hop={hop+1}/{max_hops} "
+                    f"no new entity (tracked_entities={len(self._entity_ids)}), stopping"
+                )
+                break
+
+            # 2. Add the new keys to entity_set
+            self._entity_ids.update(new_entity_ids)
+
+            logger.info(
+                f"[Step5 expansion] hop={hop+1}/{max_hops} "
+                f"entities: {pre_entities} -> +{len(new_entity_ids)} new, total={len(self._entity_ids)}"
+            )
+
+            # 3. New keys -> query the DB for new relations (not in relation_set)
+            new_event_ids: List[str] = []
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                stmt = select(EventEntity.event_id).where(
+                    EventEntity.entity_id.in_(new_entity_ids)
+                ).distinct()
+                if source_config_ids:
+                    stmt = stmt.join(
+                        SourceEvent, SourceEvent.id == EventEntity.event_id
+                    ).where(
+                        SourceEvent.source_config_id.in_(source_config_ids)
+                    )
+                result = await session.execute(stmt)
+                for row in result.fetchall():
+                    if row[0] not in self._relation_ids:
+                        new_event_ids.append(row[0])
+
+            if not new_event_ids:
+                logger.info(
+                    f"[Step5 expansion] hop={hop+1}/{max_hops} "
+                    f"no new event (tracked_events={len(self._relation_ids)}), stopping"
+                )
+                break
+
+            # 4. Read the details of the new events
+            hop_details, hop_entities = await self.step4_fetch_event_details(new_event_ids)
+
+            # 5. Add the new relations to relation_set
+            self._relation_ids.update(new_event_ids)
+
+            all_details.update(hop_details)
+            all_entities.update(hop_entities)
+
+            # 6. Keep this hop's result for the next one
+            prev_hop_entities = hop_entities
+
+            logger.info(
+                f"[Step5 expansion] hop={hop+1}/{max_hops} done: "
+                f"events {pre_events} -> {len(self._relation_ids)} (+{len(new_event_ids)}), "
+                f"entities {pre_entities} -> {len(self._entity_ids)}"
+            )
+
+        return all_details, all_entities
+
+
+    async def step6_coarse_rank(
+        self,
+        query: str,
+        event_ids: List[str],
+        source_config_ids: Optional[List[str]] = None,
+        max_events: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Step6: coarse ranking
+
+        One kNN search in ES with the query vector, filtered by event_ids,
+        returning at most max_events rows in descending similarity.
+
+        Args:
+            query: the query text
+            event_ids: the event IDs to rank
+            source_config_ids: source ID list (optional)
+            max_events: how many to return at most (AtomicConfig by default)
+
+        Returns:
+            [{"event_id": str, "score": float}, ...] in descending similarity
+        """
+        if not event_ids:
+            return []
+
+        config = AtomicConfig()
+        max_events = max_events or config.max_events
+
+        processor = await self._get_processor()
+        query_vector = await processor.generate_embedding(query)
+
+        event_repo = EventVectorRepository(get_es_client())
+        results = await event_repo.search_similar_by_title(
+            query_vector=query_vector,
+            k=max_events,
+            source_config_ids=source_config_ids,
+            event_ids=event_ids,
+        )
+
+        scored = []
+        for hit in results:
+            eid = hit.get("event_id", "")
+            score = hit.get("_score", 0.0)
+            if eid:
+                scored.append({"event_id": eid, "score": score})
+
+        top_score_str = f"{scored[0]['score']:.4f}" if scored else "0"
+        logger.info(
+            f"[Step6 coarse ranking] input={len(event_ids)}, "
+            f"returned={len(scored)}, "
+            f"top_score={top_score_str}"
+        )
+        return scored
+
+    @staticmethod
+    def _correct_rerank_line(
+        predict_line: str,
+        relation_texts: List[str],
+        relation_ids: List[str],
+    ) -> Optional[str]:
+        """When the id the LLM returned is invalid, correct it by matching the text content"""
+        text = predict_line[predict_line.find("]") + 1:].strip()
+        for line_text, id_ in zip(relation_texts, relation_ids):
+            if line_text.strip() == text:
+                return id_
+        return None
+
+    def _parse_rerank_response(
+        self,
+        useful_relations: List[str],
+        valid_ids: set,
+        relation_ids: List[str],
+        relation_texts: List[str],
+    ) -> List[str]:
+        """Parse the useful_relations the LLM returned, extract the [id] values and correct them"""
+        selected: List[str] = []
+        for line in useful_relations:
+            if "[" not in line or "]" not in line:
+                continue
+            rel_id = line[line.find("[") + 1: line.find("]")].strip()
+            if rel_id in valid_ids and rel_id not in selected:
+                selected.append(rel_id)
+            elif rel_id not in valid_ids:
+                corrected = self._correct_rerank_line(line, relation_texts, relation_ids)
+                if corrected and corrected not in selected:
+                    selected.append(corrected)
+        return selected
+
+    async def step7_llm_rerank(
+        self,
+        query: str,
+        items: List[Dict[str, Any]],
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Step7: the LLM selects the most relevant atomic events
+
+        The candidates are formatted as [id] title content and a few-shot prompt asks the LLM to
+        pick the top_k most relevant ones; the response is parsed and mapped back onto the raw data.
+
+        Args:
+            query: the query text
+            items: the candidate events [{event_id, title, content, score}]
+            top_k: how many the selection returns
+
+        Returns:
+            The filtered event list, in the order the LLM chose
+        """
+        if not items:
+            return []
+
+        top_k = min(top_k, len(items))
+
+        # 1. Build the idx -> event_id map and format the relation text
+        idx_to_event_id: Dict[str, str] = {}
+        relation_lines: List[str] = []
+        relation_texts: List[str] = []
+
+        for i, item in enumerate(items):
+            idx = str(i)
+            idx_to_event_id[idx] = item["event_id"]
+            text = item.get("content", "").strip()
+            relation_lines.append(f"[{i}] {text}")
+            relation_texts.append(text)
+
+        relations_str = "\n".join(relation_lines)
+        valid_ids = set(idx_to_event_id.keys())
+
+        # 2. Build the messages: SYSTEM + 3 few-shot pairs + the final prompt
+        system_prompt = _RERANK_SYSTEM_PROMPT.format(top_k=top_k)
+        messages = [
+            LLMMessage(role=LLMRole.SYSTEM, content=system_prompt),
+            # few-shot 1
+            LLMMessage(role=LLMRole.USER, content=_RERANK_EXAMPLE_1_INPUT),
+            LLMMessage(role=LLMRole.ASSISTANT, content=_RERANK_EXAMPLE_1_OUTPUT),
+            # few-shot 2
+            LLMMessage(role=LLMRole.USER, content=_RERANK_EXAMPLE_2_INPUT),
+            LLMMessage(role=LLMRole.ASSISTANT, content=_RERANK_EXAMPLE_2_OUTPUT),
+            # few-shot 3
+            LLMMessage(role=LLMRole.USER, content=_RERANK_EXAMPLE_3_INPUT),
+            LLMMessage(role=LLMRole.ASSISTANT, content=_RERANK_EXAMPLE_3_OUTPUT),
+            # The real query
+            LLMMessage(
+                role=LLMRole.USER,
+                content=_RERANK_TEMPLATE.format(question=query, relations=relations_str),
+            ),
+        ]
+
+        # 3. Call the LLM
+        llm_client = await self._get_llm_client()
+        response = await llm_client.chat_with_schema(
+            messages,
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "thought_process": {"type": "string"},
+                    "useful_relations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["thought_process", "useful_relations"],
+            },
+        )
+
+        # Record the token consumption
+        if hasattr(response, "usage"):
+            usage = response.usage
+            self.token_counter.add_record(
+                scenario="atomic_rerank",
+                model=getattr(response, "model", "unknown"),
+                input_tokens=usage.prompt_tokens,
+                output_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                metadata={"query": query, "candidates": len(items)},
+            )
+
+        # 4. Parse and correct
+        useful_relations = response.get("useful_relations", [])
+        selected_indices = self._parse_rerank_response(
+            useful_relations, valid_ids, list(idx_to_event_id.keys()), relation_texts,
+        )
+
+        # 5. Map back onto the raw data
+        results = []
+        event_id_to_item = {item["event_id"]: item for item in items}
+        for idx in selected_indices[:top_k]:
+            event_id = idx_to_event_id.get(idx)
+            if event_id and event_id in event_id_to_item:
+                results.append(event_id_to_item[event_id])
+
+        logger.info(
+            f"[Step7 LLM selection] query='{query}', candidates={len(items)}, "
+            f"selected={len(results)}, top_k={top_k}"
+        )
+        return results
+
+    async def step8_fetch_chunks(
+        self,
+        event_ids: List[str],
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Step8: find the chunk related to an event_id
+
+        source_event.chunk_id -> read the source_chunk details
+
+        Args:
+            event_ids: the event ID list
+
+        Returns:
+            {event_id: {"chunk_id": str, "heading": str, "content": str}}
+        """
+        if not event_ids:
+            return {}
+
+        session_factory = get_session_factory()
+        event_chunk_map: Dict[str, str] = {}
+        result_map: Dict[str, Dict[str, str]] = {}
+
+        async with session_factory() as session:
+            # 1. Look up event -> chunk_id
+            stmt = select(SourceEvent.id, SourceEvent.chunk_id).where(
+                SourceEvent.id.in_(event_ids)
+            )
+            result = await session.execute(stmt)
+            chunk_ids: set = set()
+            for row in result.fetchall():
+                eid, chunk_id = row[0], row[1]
+                if chunk_id:
+                    event_chunk_map[eid] = chunk_id
+                    chunk_ids.add(chunk_id)
+
+            if not chunk_ids:
+                return {}
+
+            # 2. Read the chunk details
+            chunk_stmt = select(SourceChunk).where(
+                SourceChunk.id.in_(chunk_ids)
+            )
+            result = await session.execute(chunk_stmt)
+            chunk_map: Dict[str, Dict[str, str]] = {}
+            for chunk in result.scalars().all():
+                chunk_map[chunk.id] = {
+                    "chunk_id": chunk.id,
+                    "source_id": chunk.source_id or "",
+                    "source_config_id": chunk.source_config_id or "",
+                    "heading": chunk.heading or "",
+                    "content": chunk.content or "",
+                    "rank": chunk.rank,
+                }
+
+            # 3. Map by event_id
+            for eid, chunk_id in event_chunk_map.items():
+                if chunk_id in chunk_map:
+                    result_map[eid] = chunk_map[chunk_id]
+
+        logger.info(
+            f"[Step8 chunk lookup] events={len(event_ids)} -> "
+            f"chunk_ids={len(chunk_ids)}, matched={len(result_map)}"
+        )
+        return result_map
+
+    async def search(
+        self,
+        query: str,
+        source_config_ids: List[str],
+        config: Optional[AtomicConfig] = None,
+    ) -> Dict[str, Any]:
+        """
+        Search the atomic events
+
+        Args:
+            query: the query text
+            source_config_ids: source ID list
+            config: the AtomicConfig configuration
+
+        Returns:
+            {
+                "items": [
+                    {
+                        "event_id": str,
+                        "title": str,
+                        "content": str,
+                        "score": float,
+                        "chunk": {"chunk_id": str, "heading": str, "content": str} or None,
+                    }
+                ],
+                "_timings": {"total": float}
+            }
+        """
+        config = config or AtomicConfig()
+        # Create an isolated state object for this search (a ContextVar), so concurrent queries cannot pollute each other
+        _atomic_search_state_var.set(_SearchState())
+        start_time = time.perf_counter()
+
+        logger.info(f"[atomic event retrieval] query='{query}', atomic_top_k={config.atomic_top_k}")
+
+        # Step1: extract the entities
+        query_entities = await self.step1_extract_entities(query)
+
+        # Step2: ES vector search for the entities
+        entity_ids, entity_names, entity_scores = await self.step2_retrieve_entities(
+            query_entities=query_entities,
+            source_config_ids=source_config_ids,
+            entity_top_k=config.entity_top_k,
+            key_similarity_threshold=config.key_similarity_threshold,
+        )
+
+        # Step3: dual-channel event recall
+        event_items = await self.step3_retrieve_events(
+            query=query,
+            source_config_ids=source_config_ids,
+            entity_ids=entity_ids,
+            atomic_top_k=config.atomic_top_k,
+            similarity_threshold=config.similarity_threshold,
+        )
+
+        event_ids = [item["event_id"] for item in event_items]
+
+        if not event_ids:
+            total_time = time.perf_counter() - start_time
+            return {
+                "items": [],
+                "_timings": {"total": total_time},
+            }
+
+        # Step4: read the event details
+        event_details, event_entities = await self.step4_fetch_event_details(event_ids)
+
+        # Step5: multi-hop expansion
+        expand_details, expand_entities = await self.step5_expand(
+            event_entities=event_entities,
+            source_config_ids=source_config_ids,
+            max_hops=config.max_hops,
+        )
+
+        # Merge every event detail (initial + expanded) and save it once
+        all_details = {**event_details, **expand_details}
+
+        # Step6: coarse ranking
+        ranked = await self.step6_coarse_rank(
+            query=query,
+            event_ids=list(all_details.keys()),
+            source_config_ids=source_config_ids,
+            max_events=config.max_events,
+        )
+
+        # Assemble the candidate list
+        candidates = []
+        for item in ranked:
+            eid = item["event_id"]
+            detail = all_details.get(eid, {})
+            candidates.append({
+                "event_id": eid,
+                "title": detail.get("title", ""),
+                "content": detail.get("content", ""),
+                "score": item["score"],
+            })
+
+        # Step7: LLM selection
+        items = await self.step7_llm_rerank(
+            query=query,
+            items=candidates,
+            top_k=config.rerank_top_k,
+        )
+
+        # Step8: find the related chunks
+        filtered_event_ids = [item["event_id"] for item in items]
+        chunk_map = await self.step8_fetch_chunks(filtered_event_ids)
+
+        for item in items:
+            item["chunk"] = chunk_map.get(item["event_id"])
+
+        total_time = time.perf_counter() - start_time
+        return {
+            "items": items,
+            "_timings": {"total": total_time},
+        }
+
+    async def search_for_rerank(
+        self,
+        query: str,
+        source_config_ids: List[str],
+        query_vector: Optional[List[float]] = None,
+        config: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Atomic event retrieval (the rerank-compatible interface)
+
+        The return shape matches VectorSearcher.search_chunks_for_rerank,
+        so it drops into the shared rerank flow.
+
+        Args:
+            query: the query text
+            source_config_ids: source ID list
+            query_vector: an optional precomputed vector (unused for now)
+            config: an AtomicConfig or SearchConfig object
+
+        Returns:
+            {"sections": [...], "_timings": {...}}
+        """
+        atomic_config = config if isinstance(config, AtomicConfig) else AtomicConfig()
+
+        result = await self.search(query, source_config_ids, atomic_config)
+
+        seen_chunk_ids: set = set()
+        sections = []
+        for i, item in enumerate(result.get("items", [])):
+            chunk = item.get("chunk")
+            if not chunk:
+                continue
+            chunk_id = chunk["chunk_id"]
+            if chunk_id in seen_chunk_ids:
+                continue
+            seen_chunk_ids.add(chunk_id)
+            sections.append({
+                "chunk_id": chunk_id,
+                "source_id": chunk["source_id"],
+                "source_config_id": chunk["source_config_id"],
+                "heading": chunk["heading"],
+                "content": chunk["content"],
+                "rank": chunk.get("rank", i),
+                "score": item["score"],
+                "weight": item["score"],
+            })
+
+        # Native top-up: when deduplication leaves fewer than max_sections, fill up with query->chunk
+        target = atomic_config.max_sections
+        if len(sections) < target:
+            atomic_count = len(sections)
+            supplement = await self.search_chunks(
+                query=query,
+                source_config_ids=source_config_ids,
+                config=atomic_config,
+            )
+            native_added = 0
+            for sec in supplement.get("sections", []):
+                if sec["chunk_id"] in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(sec["chunk_id"])
+                sections.append(sec)
+                native_added += 1
+                if len(sections) >= target:
+                    break
+            logger.info(
+                f"[native top-up] atomic={atomic_count}, native=+{native_added}, "
+                f"total={len(sections)}"
+            )
+
+        return {
+            "sections": sections[:target],
+            "_timings": result.get("_timings", {}),
+        }
+
+    async def search_chunks(
+        self,
+        query: str,
+        source_config_ids: List[str],
+        config: Optional[AtomicConfig] = None,
+    ) -> Dict[str, Any]:
+        """
+        Direct query->chunk vector search
+
+        Skips entity extraction and multi-hop expansion and retrieves chunks with the query vector.
+        Useful for simple cases, or as a supplementary channel of the Atomic pipeline.
+
+        Args:
+            query: the query text
+            source_config_ids: source ID list
+            config: the AtomicConfig configuration
+
+        Returns:
+            {"sections": [...], "_timings": {"total": float}}
+        """
+        config = config or AtomicConfig()
+        start_time = time.perf_counter()
+
+        processor = await self._get_processor()
+        query_vector = await processor.generate_embedding(query)
+
+        chunk_repo = SourceChunkRepository(get_es_client())
+        es_results = await chunk_repo.search_similar_by_content(
+            query_vector=query_vector,
+            k=config.max_sections*2,
+            source_config_ids=source_config_ids,
+        )
+
+        sections = []
+        for result in es_results:
+            score = result.get("_score", 0.0)
+            sections.append({
+                "chunk_id": result.get("chunk_id"),
+                "source_id": result.get("source_id"),
+                "source_config_id": result.get("source_config_id"),
+                "heading": result.get("heading"),
+                "content": result.get("content"),
+                "rank": result.get("rank"),
+                "score": score,
+                "weight": score,
+            })
+
+        sections = sorted(sections, key=lambda x: x["score"], reverse=True)[:config.max_sections]
+        total_time = time.perf_counter() - start_time
+
+        logger.info(
+            f"[Query→Chunk] query='{query}', "
+            f"returned={len(sections)}, total_time={total_time:.3f}s"
+        )
+
+        return {
+            "sections": sections,
+            "_timings": {"total": total_time},
+        }
+
+
+__all__ = ["AtomicSearcher"]
