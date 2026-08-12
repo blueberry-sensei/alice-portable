@@ -33,8 +33,19 @@ try {
   $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
                            -Headers @{ 'User-Agent' = 'alice-installer' } -TimeoutSec 30
 } catch {
-  Oops "Không hỏi được GitHub. Kiểm tra mạng rồi chạy lại giúp mình nhé."
-  Say  "  (chi tiết: $($_.Exception.Message))"
+  # Phân biệt 404 với lỗi mạng. Bảo "kiểm tra mạng" khi thật ra chưa có bản phát
+  # hành nào thì khách sẽ đi sửa nhầm chỗ, và sửa mãi không xong.
+  $code = $null
+  try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+  if ($code -eq 404) {
+    Oops "Chưa có bản phát hành nào để tải."
+    Say  "  Nhắn cho người đưa app cho bạn — họ cần đăng một bản lên."
+  } elseif ($code -eq 403) {
+    Oops "GitHub đang chặn tạm (quá nhiều lượt hỏi). Chờ khoảng 10 phút rồi chạy lại nhé."
+  } else {
+    Oops "Không hỏi được GitHub. Kiểm tra mạng rồi chạy lại giúp mình nhé."
+    Say  "  (chi tiết: $($_.Exception.Message))"
+  }
   return
 }
 
