@@ -40,6 +40,22 @@ const RESOURCES_DIR = process.resourcesPath && fs.existsSync(path.join(process.r
   : path.join(ROOT, 'runtime');
 
 /**
+ * Tên hiển thị của Alice = "Alice" + tên thư mục cài.
+ *
+ * Một máy có thể cài nhiều Alice độc lập (mỗi bản một thư mục, dữ liệu riêng),
+ * nên tên folder là cách phân biệt dễ nhất với người không rành kỹ thuật:
+ * folder "GoDine" → "Alice GoDine", folder "PHUONG" → "Alice PHUONG".
+ * Folder đã có sẵn chữ "Alice" thì không lặp: "alice-godine" → "Alice GoDine".
+ */
+function appName() {
+  const base = path.basename(ROOT);
+  if (!base) return 'Alice';
+  const cleaned = base.replace(/^alice[\s._-]*/i, '');
+  if (!cleaned) return 'Alice';
+  return `Alice ${cleaned}`;
+}
+
+/**
  * Tìm binary opencode.
  *
  * D-0053 mục 3: gọi bằng ĐƯỜNG DẪN TUYỆT ĐỐI tới runtime nhúng — không `npx`, không
@@ -133,6 +149,7 @@ module.exports = {
   resolveOpencode,
   loadSettings,
   saveSettings,
+  appName,
   dbPath: () => path.join(DATA_DIR, 'alice.db'),
   workDir: () => path.join(DATA_DIR, 'workspace'),
   knowledgeDir: () => path.join(ROOT, 'knowledge'),

@@ -14,6 +14,7 @@ const { provisionWorkspace } = require('./alice');
 const auth = require('./engine/auth');
 const avatar = require('./avatar');
 const { BrainSidecar } = require('./brain/sidecar');
+const { Scheduler } = require('./scheduler');
 
 let win = null;
 let store = null;
@@ -23,6 +24,12 @@ let brain = null;
 let runTurn = null;
 let settings = null;
 let busy = false;
+let scheduler = null;
+
+// Cửa sổ đóng (bấm X) chỉ ẨN app — chat app phải sống tiếp để nhận lịch hẹn và
+// không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
+// (nút "Tắt Alice" trong app, hoặc quit hệ thống) để cho đóng hẳn.
+let isQuitting = false;
 
 /**
  * `boot()` và việc nạp trang chạy SONG SONG, nên không được giả định cái nào xong
@@ -37,6 +44,7 @@ let bootPromise = null;
 
 function createWindow() {
   win = new BrowserWindow({
+    title: config.appName(),
     width: 1180,
     height: 820,
     minWidth: 780,
@@ -54,6 +62,15 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.once('ready-to-show', () => win.show());
+
+  // Bấm X = ẩn cửa sổ, KHÔNG tắt app: engine và brain vẫn chạy để lịch hẹn còn
+  // thực thi. Muốn tắt hẳn thì dùng nút "Tắt Alice" trong app (alice:shutdown).
+  win.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
 
   // Gõ một câu và bấm Gửi bằng chính UI, rồi chụp. Nghiệm thu đi qua ĐÚNG đường mà
   // người dùng đi (preload → IPC → engine → stream → DOM), thay vì gọi thẳng hàm
@@ -126,6 +143,8 @@ async function boot() {
   const workDir = provisionWorkspace(settings, { brainMcp });
 
   runTurn = createTurnRunner({ store, memory, engine, workDir, settings });
+  scheduler = new Scheduler({ store, runTurn, log });
+  scheduler.start();
 }
 
 async function startBrain() {
@@ -165,6 +184,7 @@ ipcMain.handle('alice:status', async () => {
   return {
     root: config.ROOT,
     dataDir: config.DATA_DIR,
+    appName: config.appName(),
     engine: { path: engine.binPath, source: engine.binSource, available: engine.available },
     // Chỉ tên provider — không bao giờ kèm giá trị key (D-0004).
     auth: auth.authStatus(),
@@ -251,6 +271,69 @@ ipcMain.handle('alice:models', async () => {
   }
 });
 
+// ── cuộc trò chuyện ────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:chat:clear', async () => {
+  await bootPromise;
+  const conv = store.currentConversation();
+  if (conv) {
+    log.info(`clear chat: conversation ${conv.id} — ${store.count(conv.id)} messages`);
+    store.clearConversation(conv.id);
+  }
+  return { ok: true };
+});
+
+// ── lịch hẹn ───────────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:sched:list', async () => {
+  await bootPromise;
+  return store.listSchedules();
+});
+
+ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
+  await bootPromise;
+  const h = Number(hour);
+  const m = Number(minute);
+  if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
+    return { error: 'Giờ phải là số từ 0–23, phút từ 0–59.' };
+  }
+  const text = String(task || '').trim();
+  if (!text) return { error: 'Chưa nhập việc cần làm.' };
+  const sched = store.addSchedule({ hour: h, minute: m, task: text });
+  log.info(`schedule added #${sched.id} at ${h}:${String(m).padStart(2, '0')}`);
+  return { sched };
+});
+
+ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
+  await bootPromise;
+  if (patch.task !== undefined) patch.task = String(patch.task || '').trim();
+  if (patch.task === '') return { error: 'Việc cần làm không được để trống.' };
+  const sched = store.updateSchedule(Number(id), patch);
+  if (!sched) return { error: 'Không tìm thấy lịch hẹn.' };
+  return { sched };
+});
+
+ipcMain.handle('alice:sched:remove', async (_e, id) => {
+  await bootPromise;
+  store.removeSchedule(Number(id));
+  return { ok: true };
+});
+
+// ── tắt hẳn ────────────────────────────────────────────────────────────────
+
+ipcMain.handle('alice:shutdown', async () => {
+  log.info('shutdown requested from UI');
+  isQuitting = true;
+  if (scheduler) scheduler.stop();
+  if (brain) brain.stop();
+  if (store) {
+    store.close();
+    store = null; // window-all-closed sẽ chạy lại — close() lần hai ném lỗi
+  }
+  app.quit();
+  return { ok: true };
+});
+
 ipcMain.handle('alice:settings:get', async () => settings);
 
 ipcMain.handle('alice:settings:set', async (_e, patch) => {
@@ -296,26 +379,50 @@ ipcMain.handle('alice:cancel', async () => engine.cancel());
 
 // ── vòng đời ───────────────────────────────────────────────────────────────
 
-app.whenReady().then(async () => {
-  createWindow();
-  bootPromise = boot().catch((err) => {
-    log.error(`fatal: ${err.stack || err}`);
-    if (win) win.webContents.send('alice:fatal', String(err.stack || err));
-    throw err;
+// Một máy có thể chạy nhiều Alice ở các thư mục khác nhau — nhưng cùng một thư
+// mục thì chỉ một tiến trình. Mở exe lần nữa khi app đang ẩn = hiện cửa sổ lên.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    }
   });
-  try {
-    await bootPromise;
-    log.info('boot done — ready');
-    if (win) win.webContents.send('alice:ready');
-  } catch { /* đã báo ra UI ở trên rồi */ }
-});
 
-app.on('window-all-closed', () => {
-  if (brain) brain.stop();
-  if (store) store.close();
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.whenReady().then(async () => {
+    createWindow();
+    bootPromise = boot().catch((err) => {
+      log.error(`fatal: ${err.stack || err}`);
+      if (win) win.webContents.send('alice:fatal', String(err.stack || err));
+      throw err;
+    });
+    try {
+      await bootPromise;
+      log.info('boot done — ready');
+      if (win) win.webContents.send('alice:ready');
+    } catch { /* đã báo ra UI ở trên rồi */ }
+  });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  app.on('before-quit', () => { isQuitting = true; });
+
+  app.on('window-all-closed', () => {
+    // Cửa sổ chỉ bị ẩn chứ không đóng, nên sự kiện này chỉ tới khi thoát THẬT.
+    if (scheduler) scheduler.stop();
+    if (brain) brain.stop();
+    if (store) store.close();
+    app.quit();
+  });
+
+  app.on('activate', () => {
+    // macOS: bấm icon dock khi cửa sổ đang ẩn → hiện lại.
+    if (win) {
+      win.show();
+      win.focus();
+    } else {
+      createWindow();
+    }
+  });
+}

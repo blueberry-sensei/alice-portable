@@ -32,6 +32,14 @@ contextBridge.exposeInMainWorld('alice', {
   getSettings: () => ipcRenderer.invoke('alice:settings:get'),
   setSettings: (patch) => ipcRenderer.invoke('alice:settings:set', patch),
 
+  // Cuộc trò chuyện + lịch hẹn + tắt hẳn.
+  clearChat: () => ipcRenderer.invoke('alice:chat:clear'),
+  schedList: () => ipcRenderer.invoke('alice:sched:list'),
+  schedAdd: (data) => ipcRenderer.invoke('alice:sched:add', data),
+  schedUpdate: (id, patch) => ipcRenderer.invoke('alice:sched:update', id, patch),
+  schedRemove: (id) => ipcRenderer.invoke('alice:sched:remove', id),
+  shutdown: () => ipcRenderer.invoke('alice:shutdown'),
+
   onStream: (cb) => ipcRenderer.on('alice:stream', (_e, payload) => cb(payload)),
   onReady: (cb) => ipcRenderer.on('alice:ready', () => cb()),
   onBusy: (cb) => ipcRenderer.on('alice:busy', (_e, msg) => cb(msg)),

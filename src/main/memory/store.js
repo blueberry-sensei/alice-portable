@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS schedules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    hour       INTEGER NOT NULL,
+    minute     INTEGER NOT NULL,
+    task       TEXT NOT NULL,
+    last_run   TEXT,
+    created_at INTEGER NOT NULL
+);
 `;
 
 const FTS_SCHEMA = `
@@ -57,6 +66,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 );
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+END;
+-- Xoá tin thì phải xoá bản ghi FTS tương ứng, nếu không search vẫn ra rác
+-- (bảng FTS content=external không tự biết bản ghi bị xoá).
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, text) VALUES('delete', old.id, old.text);
 END;
 `;
 
@@ -125,6 +139,53 @@ class Store {
   closeConversation(convId, summary) {
     this.db.prepare('UPDATE conversations SET closed_at = ?, summary = ? WHERE id = ?')
       .run(Date.now(), summary || '', convId);
+  }
+
+  /**
+   * Xoá CUỘC TRÒ CHUYỆN hiện tại: hết tin nhắn (kèm bản FTS qua trigger), đóng
+   * hội thoại và vứt mồi tiếp nối còn treo. Hội thoại kế tiếp tự tạo khi có
+   * lượt mới — Alice bắt đầu lại từ đầu, không còn nhớ gì của cuộc cũ.
+   */
+  clearConversation(convId) {
+    this.db.prepare('DELETE FROM messages WHERE conv_id = ?').run(convId);
+    this.db.prepare(
+      `UPDATE conversations SET closed_at = ?, summary = '', pending_seed = NULL WHERE id = ?`
+    ).run(Date.now(), convId);
+  }
+
+  // ── lịch hẹn (scheduler) ────────────────────────────────────────────────
+
+  listSchedules() {
+    return this.db.prepare('SELECT * FROM schedules ORDER BY hour, minute, id').all();
+  }
+
+  addSchedule({ hour, minute, task }) {
+    const res = this.db.prepare(
+      'INSERT INTO schedules (enabled, hour, minute, task, created_at) VALUES (1, ?, ?, ?, ?)'
+    ).run(hour, minute, task, Date.now());
+    return this.getSchedule(Number(res.lastInsertRowid));
+  }
+
+  getSchedule(id) {
+    return this.db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) || null;
+  }
+
+  updateSchedule(id, patch) {
+    const cur = this.getSchedule(id);
+    if (!cur) return null;
+    const next = { ...cur, ...patch };
+    this.db.prepare(
+      'UPDATE schedules SET enabled = ?, hour = ?, minute = ?, task = ? WHERE id = ?'
+    ).run(next.enabled ? 1 : 0, next.hour, next.minute, next.task, id);
+    return this.getSchedule(id);
+  }
+
+  removeSchedule(id) {
+    this.db.prepare('DELETE FROM schedules WHERE id = ?').run(id);
+  }
+
+  markScheduleRun(id, day) {
+    this.db.prepare('UPDATE schedules SET last_run = ? WHERE id = ?').run(day, id);
   }
 
   // ── ghi ──────────────────────────────────────────────────────────────────
