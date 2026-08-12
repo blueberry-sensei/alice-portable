@@ -42,6 +42,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# pwsh 7.3+ (CI) có thể được policy/env đặt biến này thành $true — khi đó MỌI dòng
+# stderr của lệnh native (git clone, pip...) thành terminating error và script chết
+# giữa chừng dù lệnh thành công. Chặn tường minh; lỗi thật vẫn bị $LASTEXITCODE bắt.
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $root      = Split-Path -Parent $PSScriptRoot
 $runtime   = Join-Path $root 'runtime/brain'
 $pyDir     = Join-Path $runtime 'python'
@@ -137,8 +144,15 @@ if ($Source -eq 'github') {
     $repoDir = Join-Path $srcDir $repo
     if (-not (Test-Path (Join-Path $repoDir '.git'))) {
       Write-Output "      clone $repo ($Ref)…"
-      git clone --depth 1 --branch $Ref "https://github.com/blueberry-sensei/$repo.git" $repoDir
-      if ($LASTEXITCODE -ne 0) { throw "Clone $repo hỏng (mã $LASTEXITCODE)." }
+      # `2>&1` trên native command trong PS 5.1 gói stderr thành ErrorRecord; với
+      # EAP='Stop' thì một dòng stderr vô hại (git in tiến trình ra stderr khi THÀNH
+      # CÔNG) giết cả script. Hạ EAP quanh lệnh rồi xét $LASTEXITCODE.
+      $prevEap = $ErrorActionPreference
+      $ErrorActionPreference = 'Continue'
+      git clone --depth 1 --branch $Ref "https://github.com/blueberry-sensei/$repo.git" $repoDir 2>&1 | ForEach-Object { Write-Output "        $_" }
+      $cloneCode = $LASTEXITCODE
+      $ErrorActionPreference = $prevEap
+      if ($cloneCode -ne 0) { throw "Clone $repo hỏng (mã $cloneCode)." }
     } else {
       Write-Output "      $repo đã có sẵn."
     }
