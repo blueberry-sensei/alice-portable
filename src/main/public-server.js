@@ -38,7 +38,6 @@ function verifyPassword(password, account) {
 }
 
 /**
- * @param {object} opts
  * @param {object} opts.alice       registry entry { id, name, provider }
  * @param {string} opts.baseDir     alices/<id>/
  * @param {object} opts.settings    settings chung của app
@@ -68,7 +67,7 @@ class PublicServer {
     return Boolean(this.server && this.server.listening);
   }
 
-  /** Cấu hình public của Alice: { enabled, mode, port, tokens, accounts }. */
+  /** Cấu hình public của Alice: { enabled, mode, port, accounts }. */
   config() {
     try {
       const raw = JSON.parse(fs.readFileSync(path.join(this.baseDir, 'public.json'), 'utf8'));
@@ -76,11 +75,10 @@ class PublicServer {
         enabled: Boolean(raw.enabled),
         mode: raw.mode === 'account' ? 'account' : 'anyone',
         port: raw.port || DEFAULT_PORT,
-        tokens: Array.isArray(raw.tokens) ? raw.tokens : [],
         accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
       };
     } catch {
-      return { enabled: false, mode: 'anyone', port: DEFAULT_PORT, tokens: [], accounts: [] };
+      return { enabled: false, mode: 'anyone', port: DEFAULT_PORT, accounts: [] };
     }
   }
 
@@ -212,14 +210,19 @@ class PublicServer {
   }
 
   /**
-   * Hợp lệ khi: (a) có session web còn sống, hoặc (b) có token API do chủ cấp.
+   * Hợp lệ khi có session web còn sống (đăng nhập username + password).
    * Mode 'anyone' không gọi hàm này cho /v1/chat.
    */
   _authOk(req) {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!token) return false;
-    if (this.sessions.has(token)) return true;
-    return this.config().tokens.some((t) => t.token === token);
+    const session = this.sessions.get(token);
+    if (!session) return false;
+    if (session.expires < Date.now()) {
+      this.sessions.delete(token);
+      return false;
+    }
+    return true;
   }
 
   _login(res, bodyBuf) {
@@ -277,9 +280,4 @@ class PublicServer {
   }
 }
 
-/** Tạo token truy cập mới. */
-function newToken() {
-  return crypto.randomBytes(24).toString('base64url');
-}
-
-module.exports = { PublicServer, newToken, hashPassword, verifyPassword, DEFAULT_PORT };
+module.exports = { PublicServer, hashPassword, verifyPassword, DEFAULT_PORT };

@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { PublicServer, newToken } = require('../src/main/public-server');
+const { PublicServer } = require('../src/main/public-server');
 
 function tmpBase() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-pub-'));
@@ -30,7 +30,7 @@ function makeServer(baseDir, { tokens = [] } = {}) {
     alice, baseDir, settings, engine, brainMcp: null,
     log: { info: () => {}, error: () => {} },
   });
-  server.saveConfig({ enabled: false, mode: 'anyone', port: 0, tokens, accounts: [] });
+  server.saveConfig({ enabled: false, mode: 'anyone', port: 0, accounts: [] });
   return server;
 }
 
@@ -46,7 +46,7 @@ async function freePort() {
 test('public server: mode account chưa có tài khoản thì từ chối mở máy chủ', async () => {
   const base = tmpBase();
   const server = makeServer(base, {});
-  server.saveConfig({ enabled: false, mode: 'account', port: 0, tokens: [], accounts: [] });
+  server.saveConfig({ enabled: false, mode: 'account', port: 0, accounts: [] });
   await assert.rejects(() => server.start(0), /Chưa có tài khoản/);
   server.stop();
 });
@@ -156,38 +156,4 @@ test('public server: mật khẩu KHÔNG lưu plaintext', () => {
   assert.equal(hash.length, 128, 'sha512-hex');
   const { hash: h2 } = hashPassword('mat-khau');
   assert.notEqual(hash, h2, 'cùng mật khẩu, salt khác → hash khác');
-});
-
-test('public server: thu hồi token API là hết quyền ngay (mode account)', async () => {
-  const base = tmpBase();
-  const tok = newToken();
-  const { hashPassword } = require('../src/main/public-server');
-  const server = makeServer(base, {});
-  server.saveConfig({
-    enabled: false, mode: 'account', port: 0,
-    tokens: [{ label: 'A', token: tok, created_at: 1 }],
-    accounts: [{ username: 'nga', ...hashPassword('mat-khau-123') }],
-  });
-  const port = await freePort();
-  await server.start(port);
-  try {
-    // Token API còn hiệu lực → dùng được (không cần đăng nhập).
-    const ok = await fetch(`http://127.0.0.1:${port}/v1/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-      body: JSON.stringify({ message: 'x' }),
-    });
-    assert.equal(ok.status, 200);
-
-    const cfg = server.config();
-    server.saveConfig({ ...cfg, tokens: [] }); // thu hồi
-    const r = await fetch(`http://127.0.0.1:${port}/v1/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-      body: JSON.stringify({ message: 'x' }),
-    });
-    assert.equal(r.status, 401, 'token đã thu hồi phải bị từ chối');
-  } finally {
-    server.stop();
-  }
 });

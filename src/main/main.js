@@ -433,56 +433,52 @@ ipcMain.handle('alice:public:info', async (_e, id) => {
   try {
     const pub = publicServerFor(id);
     const cfg = pub.config();
-    const ips = require('node:os').networkInterfaces();
-    const addrs = [];
-    for (const list of Object.values(ips)) {
-      for (const a of list || []) {
-        if (a.family === 'IPv4' && !a.internal) addrs.push(a.address);
-      }
-    }
     const port = pub.port || cfg.port;
     return {
       enabled: pub.running,
       mode: cfg.mode,
       port,
-      tokens: cfg.tokens,
       accounts: cfg.accounts.map((a) => ({ username: a.username })),
-      // Link LAN đầu tiên là link "cho người khác" (QR dùng cái này); local là của chủ.
-      shareUrl: addrs.length ? `http://${addrs[0]}:${port}` : null,
+      shareUrl: shareableUrl(port),
       localUrl: `http://127.0.0.1:${port}`,
-      lanUrls: addrs.map((ip) => `http://${ip}:${port}`),
+      lanUrls: shareableIps().map((ip) => `http://${ip}:${port}`),
     };
   } catch (err) {
     return { error: String(err.message || err) };
   }
 });
 
-ipcMain.handle('alice:public:token:add', async (_e, id, label) => {
-  await bootPromise;
-  try {
-    const pub = publicServerFor(id);
-    const cfg = pub.config();
-    const token = require('./public-server').newToken();
-    cfg.tokens.push({ label: String(label || '').trim() || 'Không tên', token, created_at: Date.now() });
-    pub.saveConfig(cfg);
-    return { token };
-  } catch (err) {
-    return { error: String(err.message || err) };
+/**
+ * IP mà MÁY KHÁC cùng mạng vào được — lọc rác:
+ *   - Tailscale/CGNAT 100.64/10 — chỉ máy trong mạng Tailscale vào được;
+ *   - Docker bridge 172.17/16, VirtualBox host-only 192.168.56/24, link-local;
+ *   - interface mang tên docker/virtualbox/vEthernet/Tailscale/WSL…
+ */
+function shareableIps() {
+  const ips = require('node:os').networkInterfaces();
+  const badName = /docker|virtualbox|vethernet|tailscale|zerotier|hamachi|default switch|wsl/i;
+  const badRange = (ip) => {
+    const p = ip.split('.').map(Number);
+    if (p[0] === 127 || (p[0] === 169 && p[1] === 254)) return true;   // loopback, link-local
+    if (p[0] === 100) return true;                                     // Tailscale/CGNAT
+    if (p[0] === 172 && p[1] === 17) return true;                      // Docker bridge mặc định
+    if (p[0] === 192 && p[1] === 168 && p[2] === 56) return true;       // VirtualBox host-only
+    return false;
+  };
+  const out = [];
+  for (const [name, list] of Object.entries(ips)) {
+    if (badName.test(name)) continue;
+    for (const a of list || []) {
+      if (a.family === 'IPv4' && !a.internal && !badRange(a.address)) out.push(a.address);
+    }
   }
-});
+  return out;
+}
 
-ipcMain.handle('alice:public:token:remove', async (_e, id, token) => {
-  await bootPromise;
-  try {
-    const pub = publicServerFor(id);
-    const cfg = pub.config();
-    cfg.tokens = cfg.tokens.filter((t) => t.token !== token);
-    pub.saveConfig(cfg);
-    return { ok: true };
-  } catch (err) {
-    return { error: String(err.message || err) };
-  }
-});
+function shareableUrl(port) {
+  const ips = shareableIps();
+  return ips.length ? `http://${ips[0]}:${port}` : null;
+}
 
 // ── tiện ích ───────────────────────────────────────────────────────────────
 
