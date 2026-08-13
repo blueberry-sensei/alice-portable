@@ -207,7 +207,7 @@ function makeSummarizer() {
           'Giữ lại: quyết định đã chốt, con số, tên riêng, việc còn dở. Bỏ: lời chào, câu xã giao. ' +
           'Viết tiếng Việt, gạch đầu dòng, không mở bài.\n\n' + transcript,
         sessionId: null,
-        model: settings.model || null,
+        model: engine.settings?.model || null,
         cwd: config.workDir(),
       });
       return out.text;

@@ -247,7 +247,7 @@ class PublicServer {
             + 'Giữ lại: ai hỏi gì, quyết định đã chốt, con số, tên riêng, việc còn dở. Bỏ lời chào. '
             + 'Viết tiếng Việt, gạch đầu dòng, không mở bài.\n\n' + transcript,
           sessionId: null,
-          model: this.settings.model || null,
+          model: this.engine.settings?.model || null,
           cwd: path.join(this.baseDir, 'workspace'),
         });
         return out.text;

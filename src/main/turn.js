@@ -101,10 +101,15 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
     parts.push(who ? `[${who}]: ${userText}` : userText);
     const message = parts.join('\n\n');
 
+    // Model của RIÊNG Alice này, không phải `settings.model` toàn cục — đo thật
+    // 2026-08-13: Alice cấu hình provider claude/model claude-sonnet-5 vẫn nhận
+    // đúng field mồ côi `settings.model` (giá trị cũ từ thời chưa có multi-Alice),
+    // đẩy sai model xuống engine dù `engine.settings.model` đã được activateAlice
+    // gán đúng theo alice.model.
     const out = await engine.runWithFallback({
       message,
       sessionId: conversation.engine_session || null,
-      model: settings.model || null,
+      model: engine.settings?.model || null,
       cwd: workDir,
       onEvent: onStream ? (ev, partial) => onStream(partial, ev) : null,
     });
