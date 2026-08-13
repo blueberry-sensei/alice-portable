@@ -25,6 +25,8 @@ const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { createTurnRunner } = require('./turn');
 const { provisionWorkspace } = require('./alice');
+const { isMention } = require('./mention');
+const { toolActivity } = require('./activity');
 
 const DEFAULT_PORT = 8931;
 
@@ -110,6 +112,12 @@ class PublicServer {
     this.sessions = new Map();   // sessionToken → { who, expires } (chỉ trong RAM)
     this.hits = new Map();       // ip → { chat: number[], login: number[] }
     this.webPage = null;
+    // Trình duyệt đang mở SSE. Đây là thứ biến trang web từ "mỗi máy tự vẽ tin của
+    // chính nó" thành một phòng chat THẬT: ai gửi gì, mọi máy thấy ngay và thấy
+    // CÙNG MỘT THỨ TỰ (thứ tự do id trong kho quyết định, không do máy nào tự xếp).
+    this.clients = new Set();
+    this.heartbeat = null;
+    this.activity = null;        // tool Alice đang chạy, để máy vào sau biết ngay
   }
 
   get running() {
@@ -171,7 +179,10 @@ class PublicServer {
 
     if (!this.store) {
       this.store = new Store(path.join(this.baseDir, 'chat.db'));
-      const memory = new Memory(this.store, this.settings);
+      // Nén bằng CHÍNH model đang dùng, không phải bản nén cơ học mặc định. Phòng
+      // chat công khai dài rất nhanh (nhiều người cùng nói), nên chất lượng bản
+      // compact quyết định Alice còn nhớ được gì sau khi xoay session.
+      const memory = new Memory(this.store, this.settings, this._summarizer());
       const workDir = path.join(this.baseDir, 'workspace');
       provisionWorkspace(this.settings, { brainMcp: this.brainMcp, dir: workDir });
       this.runTurn = createTurnRunner({ store: this.store, memory, engine: this.engine, workDir, settings: this.settings });
@@ -192,11 +203,46 @@ class PublicServer {
       });
       this.server.listen(this.port, '0.0.0.0', () => resolve());
     });
+    // Qua cloudflared và qua proxy của nhà mạng, một kết nối SSE im lặng vài chục
+    // giây là bị cắt. Dòng comment rỗng định kỳ giữ nó sống.
+    this.heartbeat = setInterval(() => this._broadcastRaw(': ping\n\n'), 20000);
+    this.heartbeat.unref?.();
+
     this.log.info(`public server UP: ${this.alice.name} mode=${cfg.mode} on :${this.port}`);
     return { ok: true };
   }
 
+  /** Nén phần cũ bằng model — dùng cho `Memory` của phòng chat này. */
+  _summarizer() {
+    return async (messages) => {
+      const transcript = messages.map((m) => `[${m.role === 'alice' ? 'Alice' : 'khách'}]: ${m.text}`).join('\n');
+      try {
+        this.engine.setBaseDir(this.baseDir);
+        const out = await this.engine.runWithFallback({
+          message:
+            'Tóm tắt đoạn hội thoại nhiều người dưới đây thành ghi chú để CHÍNH BẠN đọc lại ở phiên sau. '
+            + 'Giữ lại: ai hỏi gì, quyết định đã chốt, con số, tên riêng, việc còn dở. Bỏ lời chào. '
+            + 'Viết tiếng Việt, gạch đầu dòng, không mở bài.\n\n' + transcript,
+          sessionId: null,
+          model: this.settings.model || null,
+          cwd: path.join(this.baseDir, 'workspace'),
+        });
+        return out.text;
+      } catch {
+        return null; // → Memory rơi về bản nén cơ học, thà thô còn hơn mất
+      }
+    };
+  }
+
   stop() {
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
+    for (const c of this.clients) {
+      try { c.end(); } catch { /* đã đóng */ }
+    }
+    this.clients.clear();
     if (this.server) {
       try { this.server.close(); } catch { /* đã đóng */ }
       this.server = null;
@@ -330,11 +376,27 @@ class PublicServer {
     // ra là một câu chào viết cứng trong mã.
     if (req.method === 'GET' && url.pathname === '/v1/history') {
       const cfg = this.config();
-      if (cfg.mode !== 'anyone' && !this._authOk(req)) {
+      if (cfg.mode !== 'anyone' && !this._authOk(req, url)) {
         this._json(res, 401, { error: 'Cần vào cửa trước đã.' });
         return;
       }
-      this._json(res, 200, { messages: this._history(Number(url.searchParams.get('limit')) || 60) });
+      const since = url.searchParams.get('since');
+      this._json(res, 200, {
+        messages: since !== null
+          ? this._since(Number(since) || 0)
+          : this._history(Number(url.searchParams.get('limit')) || 60),
+      });
+      return;
+    }
+
+    // Dòng sự kiện realtime: mọi trình duyệt đang mở phòng đều nhận cùng một luồng.
+    if (req.method === 'GET' && url.pathname === '/v1/events') {
+      const cfg = this.config();
+      if (cfg.mode !== 'anyone' && !this._authOk(req, url)) {
+        this._json(res, 401, { error: 'Cần vào cửa trước đã.' });
+        return;
+      }
+      this._openStream(req, res);
       return;
     }
 
@@ -378,16 +440,27 @@ class PublicServer {
     if (!this.store) return [];
     const conv = this.store.currentConversation();
     if (!conv) return [];
-    return this.store.recent(conv.id, Math.min(Math.max(limit, 1), 200)).map((m) => {
-      let who = null;
-      try { who = (JSON.parse(m.meta || 'null') || {}).who || null; } catch { /* meta rác */ }
-      return { role: m.role, text: m.text, ts: m.ts, who };
-    });
+    return this.store.recent(conv.id, Math.min(Math.max(limit, 1), 200)).map((m) => this._wire(m));
   }
 
-  /** Hợp lệ khi có phiên còn sống. Mode `anyone` không gọi hàm này cho /v1/chat. */
-  _authOk(req) {
-    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  /** Phần còn thiếu kể từ `sinceId` — trang web gọi sau mỗi lần nối lại SSE. */
+  _since(sinceId) {
+    if (!this.store) return [];
+    const conv = this.store.currentConversation();
+    if (!conv) return [];
+    return this.store.since(conv.id, sinceId).map((m) => this._wire(m));
+  }
+
+  /**
+   * Hợp lệ khi có phiên còn sống. Mode `anyone` không gọi hàm này cho /v1/chat.
+   *
+   * `EventSource` KHÔNG gắn được header, nên riêng luồng SSE token đi qua query.
+   * Chấp nhận đánh đổi: token lọt vào log truy cập của proxy. Đổi lại nó là token
+   * phiên chat, hết hạn 7 ngày và thu hồi được bằng cách đổi mã truy cập.
+   */
+  _authOk(req, url = null) {
+    let token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!token && url) token = url.searchParams.get('token') || '';
     if (!token) return false;
     const session = this.sessions.get(token);
     if (!session) return false;
@@ -455,38 +528,118 @@ class PublicServer {
     this._json(res, 200, { token: this._newSession(username, 'account'), name: username });
   }
 
+  // ── dòng sự kiện realtime (SSE) ─────────────────────────────────────────
+
+  _openStream(req, res) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Nginx và vài proxy gom đệm response; SSE mà bị gom là không còn realtime.
+      'X-Accel-Buffering': 'no',
+    });
+    this.clients.add(res);
+    // Máy vừa vào phải biết ngay Alice có đang bận không, chứ không ngồi chờ sự
+    // kiện tiếp theo mới hiện trạng thái.
+    res.write(`data: ${JSON.stringify({ type: 'hello', busy: this.busy, activity: this.activity })}\n\n`);
+
+    // Nghe `res`, KHÔNG nghe `req`.
+    //
+    // `req` là luồng ĐỌC của một request GET không có thân — nó kết thúc ngay lập
+    // tức, và Node bắn `req.on('close')` ngay sau đó. Bản đầu nghe ở đó nên mọi
+    // client SSE bị gỡ khỏi danh sách đúng một nhịp sau khi vào: `clients` luôn
+    // bằng 0, không ai nhận được gì, mà server vẫn báo 200 và trang web vẫn im
+    // lặng như thể máy chủ không có tin nào để phát.
+    res.on('close', () => this.clients.delete(res));
+    res.on('error', () => this.clients.delete(res));
+  }
+
+  _broadcastRaw(chunk) {
+    for (const c of this.clients) {
+      try { c.write(chunk); } catch { this.clients.delete(c); }
+    }
+  }
+
+  _broadcast(event) {
+    this._broadcastRaw(`data: ${JSON.stringify(event)}\n\n`);
+  }
+
+  /** Một tin trong kho → hình dạng mà trang web hiểu. */
+  _wire(row) {
+    let who = null;
+    try { who = (JSON.parse(row.meta || 'null') || {}).who || null; } catch { /* meta rác */ }
+    return { id: row.id, role: row.role, text: row.text, ts: row.ts, who };
+  }
+
   /**
    * Một lượt một người: engine chỉ chạy được một session tại một thời điểm. Người
    * tới sau XẾP HÀNG thay vì bị đuổi ngay — "cho mọi người cùng xài" mà cứ hai
    * người bấm cùng lúc là một người ăn lỗi thì không dùng được. Hàng có trần để
    * không biến thành chỗ chứa vô hạn.
+   *
+   * Trả lời NGAY sau khi lưu tin, không chờ Alice nói xong: câu của người gửi phải
+   * hiện lên mọi máy tức thì. Câu trả lời của Alice tới sau qua SSE. Đây là chỗ
+   * sửa "chat không realtime, thứ tự lộn xộn" — không máy nào tự chèn tin vào danh
+   * sách của mình nữa, tất cả cùng nhận một luồng đã có id.
    */
   async _chat(res, message, who) {
     if (!this.runTurn) {
       this._json(res, 503, { error: 'Alice chưa sẵn sàng.' });
       return;
     }
+    // `@alice` mới gọi Alice. Không gọi thì vẫn lưu và vẫn phát cho cả phòng —
+    // im lặng khác với mù: lượt sau có gọi, Alice đọc lại hết phần này.
+    const wanted = isMention(message, this.alice.name);
+
+    if (!wanted) {
+      const out = await this.runTurn(message, null, { who, silent: true });
+      const row = { id: out.messageId, role: 'human', text: message, ts: Date.now(), who };
+      this._broadcast({ type: 'message', message: row });
+      this._json(res, 200, { ok: true, id: out.messageId, replied: false });
+      return;
+    }
+
     if (this.busy && this.queue >= MAX_QUEUE) {
       this._json(res, 429, { error: 'Alice đang bận nhiều lượt — thử lại sau một chút.' });
       return;
     }
+
+    // Lưu + phát tin của người gửi TRƯỚC, rồi mới chạy lượt ở nền.
+    this._json(res, 202, { ok: true, replied: true });
     this.queue += 1;
     try {
-      while (this.busy) {
-        await new Promise((r) => setTimeout(r, 250));
-      }
+      while (this.busy) await new Promise((r) => setTimeout(r, 200));
       this.busy = true;
+      this._broadcast({ type: 'busy', busy: true });
       try {
         this.engine.setBaseDir(this.baseDir);
-        const out = await this.runTurn(message, null, { who });
-        this.log.info(`public chat ok: who=${who} model=${out.model || '-'} session=${out.engineSession || '-'}`);
-        this._json(res, 200, { text: out.text, model: out.model });
+        const seenIds = new Set();
+        const out = await this.runTurn(message, (partial, ev) => {
+          // Chỉ phát sự kiện TOOL, không phát chữ đang chảy: nhiều máy cùng nhận
+          // một luồng chữ chạy thì tin nửa vời chen vào giữa lịch sử của người
+          // khác — đúng kiểu "thứ tự lộn xộn" cần tránh.
+          const act = toolActivity(ev);
+          if (act && !seenIds.has(act.key)) {
+            seenIds.add(act.key);
+            this.activity = act.label;
+            this._broadcast({ type: 'activity', label: act.label });
+          }
+        }, { who });
+
+        this.activity = null;
+        this.log.info(`public chat ok: who=${who} model=${out.model || '-'} caughtUp=${out.caughtUp || 0}`);
+        // Phát cả tin của người gửi lẫn câu trả lời, theo đúng id trong kho.
+        for (const row of this.store.since(out.conversationId, out.messageId - 1)) {
+          this._broadcast({ type: 'message', message: this._wire(row) });
+        }
       } catch (err) {
+        this.activity = null;
         this.lastError = err.message;
         this.log.error(`public chat failed: ${err.message}`);
-        this._json(res, 500, { error: err.message });
+        this._broadcast({ type: 'error', error: err.message });
       } finally {
         this.busy = false;
+        this._broadcast({ type: 'busy', busy: false });
       }
     } finally {
       this.queue -= 1;

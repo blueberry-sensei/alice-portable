@@ -49,22 +49,51 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
    */
   return async function runTurn(userText, onStream = null, opts = {}) {
     const who = opts.who || null;
+    const silent = opts.silent === true;
     const { conversation, seed, reason } = await memory.ensureConversation();
 
     // Lưu tin NGUYÊN VĂN, không kèm mồi. Mồi là chuyện của engine, không phải thứ
     // Bệ hạ đã gõ — trộn vào là lịch sử sai và lần nén sau sẽ nén cả mồi.
-    store.add({
+    const messageId = store.add({
       convId: conversation.id,
       role: 'human',
       text: userText,
       engineSession: conversation.engine_session,
       meta: who ? { who } : null,
+      // Tin KHÔNG gọi Alice: lưu lại nhưng đánh dấu chưa đưa vào ngữ cảnh. Nó sẽ
+      // được gộp vào lượt kế tiếp có gọi Alice.
+      delivered: !silent,
     });
 
+    // Im lặng ≠ mù: Alice không trả lời câu này, nhưng câu này vẫn nằm trong kho và
+    // sẽ đi vào ngữ cảnh của lượt sau. Trả về sớm, KHÔNG gọi engine — đó là toàn bộ
+    // lý do của luật "@alice mới trả lời": không đốt API key cho mỗi câu người ta
+    // nói với nhau.
+    if (silent) {
+      return { silent: true, messageId, conversationId: conversation.id };
+    }
+
+    /**
+     * Những gì đã nói mà Alice chưa đọc, gộp vào TRƯỚC câu gọi.
+     *
+     * Không có khối này thì Alice bị gọi giữa chừng một cuộc trò chuyện và trả lời
+     * như vừa mới vào phòng — biết mỗi câu cuối. Đó chính là thứ luật "@alice" sẽ
+     * làm hỏng nếu chỉ chặn mà không bù lại.
+     */
+    const pending = store.undelivered(conversation.id).filter((m) => m.id !== messageId);
+    const parts = [];
+    if (seed) parts.push(seed);
+    if (pending.length) {
+      parts.push([
+        `[${pending.length} TIN TRONG PHÒNG CHAT MÀ BẠN CHƯA ĐỌC — người ta nói với nhau, không gọi bạn]`,
+        ...pending.map((m) => `[${nameOf(m)}]: ${m.text}`),
+        '[HẾT PHẦN CHƯA ĐỌC — bên dưới là câu GỌI BẠN, hãy trả lời câu đó]',
+      ].join('\n'));
+    }
     // Nhiều người chung một Alice: model PHẢI biết ai đang nói, không thì nó trả
     // lời người này bằng ngữ cảnh của người kia mà không hề biết mình nhầm.
-    const said = who ? `[${who}]: ${userText}` : userText;
-    const message = seed ? `${seed}\n\n${said}` : said;
+    parts.push(who ? `[${who}]: ${userText}` : userText);
+    const message = parts.join('\n\n');
 
     const out = await engine.runWithFallback({
       message,
@@ -80,8 +109,11 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
       conversation.engine_session = out.sessionId;
     }
 
+    // Đã vào ngữ cảnh của engine rồi thì đánh dấu, để lượt sau không gộp lại lần hai.
+    if (pending.length) store.markDelivered(pending.map((m) => m.id));
+
     const tokensInput = occupiedWindow(out.tokens);
-    store.add({
+    const replyId = store.add({
       convId: conversation.id,
       role: 'alice',
       text: out.text,
@@ -96,6 +128,9 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
 
     return {
       conversationId: conversation.id,
+      messageId,
+      replyId,
+      caughtUp: pending.length,
       engineSession: out.sessionId,
       text: out.text,
       model: out.model,
@@ -110,4 +145,14 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
   };
 }
 
-module.exports = { createTurnRunner, occupiedWindow };
+/** Tên hiển thị của người gửi một tin đã lưu. */
+function nameOf(m) {
+  if (m.role === 'alice') return 'Alice';
+  try {
+    const who = (JSON.parse(m.meta || 'null') || {}).who;
+    if (who) return who;
+  } catch { /* meta rác — rơi về tên chung */ }
+  return 'Bệ hạ';
+}
+
+module.exports = { createTurnRunner, occupiedWindow, nameOf };

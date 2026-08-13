@@ -18,6 +18,7 @@ const { Scheduler } = require('./scheduler');
 const { Updater } = require('./updater');
 const { PublicServer } = require('./public-server');
 const { Tunnel } = require('./tunnel');
+const { toolActivity } = require('./activity');
 const registryModule = require('./registry');
 
 /**
@@ -446,6 +447,45 @@ ipcMain.handle('alice:alice:select', async (_e, id) => {
     return { error: String(err.message || err) };
   }
   return { ok: true };
+});
+
+/**
+ * Tắt RIÊNG một Alice: buông chat db, brain, lịch hẹn, máy chủ public và tunnel
+ * của nó — nhưng app vẫn chạy và các Alice khác không bị đụng tới.
+ *
+ * Trước đây chỉ có "Tắt Alice hẳn" (tắt cả app). Muốn một Alice ngừng ăn tài nguyên
+ * hoặc ngừng phục vụ web thì phải tắt tất — hoặc xoá nó đi, mất sạch dữ liệu.
+ */
+ipcMain.handle('alice:alice:stop', async (_e, id) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  try {
+    const pub = publicServers.get(id);
+    if (pub) { pub.stop(); publicServers.delete(id); }
+    const tun = tunnels.get(id);
+    if (tun) { tun.stop(); tunnels.delete(id); }
+
+    if (registry.active === id) {
+      if (scheduler) scheduler.stop();
+      if (brain) brain.stop();
+      if (store) { store.close(); store = null; }
+      scheduler = null;
+      brain = null;
+      memory = null;
+      runTurn = null;
+      registry.active = null;
+      registryModule.save(registry);
+      if (win) {
+        win.webContents.send('alice:alice-changed', {
+          id: null, alices: registry.alices, active: null, stopped: id,
+        });
+      }
+    }
+    log.info(`alice stopped: ${id}`);
+    return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
 });
 
 ipcMain.handle('alice:alice:remove', async (_e, id) => {
@@ -961,7 +1001,15 @@ ipcMain.handle('alice:send', async (event, text) => {
   busy = true;
   const sender = event.sender;
   try {
+    const seen = new Set();
     const res = await runTurn(text, (partial, ev) => {
+      // Alice gọi công cụ thì phải THẤY nó đang gọi cái gì: một lượt tra trí nhớ
+      // mất 40 giây nhìn y hệt một lượt treo, và người dùng bấm dừng vì tưởng hỏng.
+      const act = toolActivity(ev);
+      if (act && !seen.has(act.key)) {
+        seen.add(act.key);
+        sender.send('alice:stream', { activity: act.label, type: 'tool' });
+      }
       sender.send('alice:stream', { partial, type: ev.type });
     });
     // Lượt thành công: ghi chẩn đoán gọn — model nào chạy, thử mấy model hỏng,

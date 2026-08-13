@@ -84,11 +84,29 @@ class Store {
     this.db = new DatabaseSync(dbFile);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(SCHEMA);
+    this._migrate();
     try {
       this.db.exec(FTS_SCHEMA);
       this.fts = true;
     } catch {
       this.fts = false; // bản SQLite không kèm FTS5 → /nhớ rơi về LIKE
+    }
+  }
+
+  /**
+   * Nâng cấp schema cho kho ĐÃ CÓ.
+   *
+   * `CREATE TABLE IF NOT EXISTS` không đụng vào bảng đang tồn tại, nên cột mới phải
+   * thêm bằng ALTER. Kho của người dùng đã chạy từ bản trước — thêm cột mà quên
+   * migrate là app chết ngay câu SELECT đầu tiên.
+   */
+  _migrate() {
+    const cols = this.db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+    if (!cols.includes('delivered')) {
+      // `delivered = 0`: tin đã LƯU nhưng Alice CHƯA đọc — sinh ra khi có luật
+      // "@alice mới trả lời". Mọi tin cũ mặc định là đã đọc (1), vì chúng đều đã
+      // đi qua engine ở thời điểm được gửi.
+      this.db.exec('ALTER TABLE messages ADD COLUMN delivered INTEGER NOT NULL DEFAULT 1');
     }
   }
 
@@ -195,14 +213,35 @@ class Store {
    * gì về credential, và đặt bộ che ở hai chỗ là cách chắc chắn để hai chỗ trôi khỏi
    * nhau (cùng lý do `_secrets.py` ở repo automation, D-0004).
    */
-  add({ convId, role, text, tokensInput = null, engineSession = null, meta = null, ts = null }) {
+  add({ convId, role, text, tokensInput = null, engineSession = null, meta = null, ts = null, delivered = true }) {
     if (!text) return null;
     const res = this.db.prepare(
-      `INSERT INTO messages (conv_id, ts, role, text, tokens_input, engine_session, meta)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (conv_id, ts, role, text, tokens_input, engine_session, meta, delivered)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(convId, ts ?? Date.now(), role, text, tokensInput, engineSession,
-      meta ? JSON.stringify(meta) : null);
+      meta ? JSON.stringify(meta) : null, delivered ? 1 : 0);
     return Number(res.lastInsertRowid);
+  }
+
+  /** Tin đã lưu mà Alice CHƯA đọc, cũ → mới. */
+  undelivered(convId) {
+    return this.db.prepare(
+      'SELECT * FROM messages WHERE conv_id = ? AND delivered = 0 ORDER BY id'
+    ).all(convId);
+  }
+
+  /** Đánh dấu đã đưa vào ngữ cảnh của Alice — gọi SAU khi lượt chạy xong. */
+  markDelivered(ids) {
+    if (!ids || !ids.length) return;
+    const q = this.db.prepare('UPDATE messages SET delivered = 1 WHERE id = ?');
+    for (const id of ids) q.run(id);
+  }
+
+  /** Tin có id LỚN HƠN `sinceId`, cũ → mới — để trang web lấy phần còn thiếu. */
+  since(convId, sinceId, limit = 200) {
+    return this.db.prepare(
+      'SELECT * FROM messages WHERE conv_id = ? AND id > ? ORDER BY id LIMIT ?'
+    ).all(convId, Number(sinceId) || 0, Math.min(limit, MAX_ROWS));
   }
 
   // ── đọc ──────────────────────────────────────────────────────────────────

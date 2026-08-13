@@ -177,6 +177,14 @@
   }
   button:disabled { opacity: .5; cursor: default; }
   .send { width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%; padding: 0; font-size: 17px; }
+  /* Chèn "@alice" bằng một lần chạm — gõ tay trên điện thoại vừa lâu vừa dễ sai,
+     mà gõ sai thì Alice im lặng và người dùng tưởng nó hỏng. */
+  .at {
+    width: 42px; height: 46px; flex-shrink: 0; border-radius: 16px; padding: 0;
+    font-size: 19px; font-weight: 800;
+    background: transparent; border: 1px solid var(--border-2); color: var(--primary-soft);
+  }
+  .at:active { background: var(--surface); }
 
   /* Màn hình rộng: bó lại giữa cho khỏi trải dài cả màn desktop. */
   @media (min-width: 720px) {
@@ -209,7 +217,8 @@
   <div id="chat-view" class="feed" hidden></div>
 
   <div id="compose" class="compose" hidden>
-    <textarea id="msg" rows="1" placeholder="Nhắn cho Alice…" enterkeyhint="send" autocomplete="off" autocapitalize="sentences"></textarea>
+    <button class="at" id="at-btn" title="Gọi Alice">@</button>
+    <textarea id="msg" rows="1" placeholder="Nhắn cho cả phòng… (@alice để gọi Alice)" enterkeyhint="send" autocomplete="off" autocapitalize="sentences"></textarea>
     <button class="send" id="send" title="Gửi">➤</button>
   </div>
 
@@ -220,6 +229,9 @@
      account — hỏi username + password.                                        */
 const MODE = '__MODE__';
 const API = '';
+// Phòng chat nhiều người: Alice chỉ trả lời khi được gọi tên. Không có luật này thì
+// nó chen vào mọi câu người ta nói với nhau — và đốt API key của chủ máy theo.
+const MENTION = '@alice';
 let token = localStorage.getItem('alice-token') || null;
 let myName = null;
 
@@ -313,14 +325,19 @@ async function enter() {
   }
 }
 
+/* Id tin lớn nhất đã vẽ. Thứ tự và trùng lặp đều quyết bằng con số này, KHÔNG
+   bằng thứ tự tin về tới máy — hai người gửi cùng lúc thì mỗi máy nhận theo một
+   thứ tự khác nhau, và đó đúng là cái "chat lộn xộn" phải bỏ. */
+let lastId = 0;
+const drawn = new Set();
+
 async function enterChat() {
   $('gate-view').hidden = true;
   $('chat-view').hidden = false;
   $('compose').hidden = false;
-  $('alice-sub').textContent = myName ? `bạn đang là ${myName}` : 'Alice nhớ cuộc trò chuyện này';
+  setSub();
 
-  // Lịch sử THẬT của Alice, không phải một câu chào viết cứng trong mã: người vào
-  // sau đọc được cuộc trò chuyện đang diễn ra, và F5 không mất gì.
+  // Lịch sử THẬT: người vào sau đọc được cuộc đang diễn ra, F5 không mất gì.
   let messages = [];
   try {
     const r = await fetch(API + '/v1/history?limit=60', { headers: auth() });
@@ -328,10 +345,51 @@ async function enterChat() {
   } catch { /* không đọc được thì mở màn hình trống, vẫn chat được */ }
 
   if (!messages.length) {
-    addMsg({ role: 'alice', text: 'Chào bạn, mình có thể giúp gì?' });
+    addMsg({ role: 'alice', text: `Chào cả nhà. Nhắn kèm ${MENTION} khi cần mình nhé.` });
   } else {
     for (const m of messages) addMsg(m);
   }
+  connectStream();
+}
+
+function setSub(extra) {
+  $('alice-sub').textContent = extra
+    || (myName ? `bạn là ${myName} · gọi mình bằng ${MENTION}` : `gọi mình bằng ${MENTION}`);
+}
+
+/**
+ * Dòng sự kiện realtime.
+ *
+ * `EventSource` tự nối lại khi rớt mạng — nhưng nó KHÔNG biết mình đã bỏ lỡ gì,
+ * nên mỗi lần mở lại phải hỏi kho phần còn thiếu kể từ `lastId`. Thiếu bước đó thì
+ * đúng lúc wifi chớp một cái là mất vài tin mà không ai hay.
+ */
+let es = null;
+function connectStream() {
+  if (es) es.close();
+  // EventSource không gắn được header, nên token đi qua query cho đúng luồng này.
+  const q = token ? `?token=${encodeURIComponent(token)}` : '';
+  es = new EventSource(API + '/v1/events' + q);
+
+  es.onopen = () => { catchUp(); };
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.type === 'message') addMsg(ev.message);
+    else if (ev.type === 'activity') showActivity(ev.label);
+    else if (ev.type === 'busy') { if (ev.busy) showActivity('đang trả lời…'); else clearActivity(); }
+    else if (ev.type === 'hello') { if (ev.busy) showActivity(ev.activity || 'đang trả lời…'); }
+    else if (ev.type === 'error') { clearActivity(); addMsg({ role: 'alice', text: ev.error }, true); }
+  };
+  es.onerror = () => { /* EventSource tự thử lại; catchUp() chạy ở onopen */ };
+}
+
+async function catchUp() {
+  try {
+    const r = await fetch(API + `/v1/history?since=${lastId}`, { headers: auth() });
+    if (!r.ok) return;
+    for (const m of (await r.json()).messages || []) addMsg(m);
+  } catch { /* lát nữa nối lại thì hỏi lần nữa */ }
 }
 
 /**
@@ -339,10 +397,18 @@ async function enterChat() {
  * `who` là tên người gửi. Tin của CHÍNH mình nằm bên phải và không cần đề tên.
  */
 function addMsg(m, isErr) {
+  // Tin có id thì đi qua cửa chống-trùng và cửa thứ-tự. Tin không id (câu chào,
+  // câu báo lỗi tại chỗ) vẽ thẳng.
+  if (m.id) {
+    if (drawn.has(m.id)) return null;
+    drawn.add(m.id);
+    if (m.id > lastId) lastId = m.id;
+  }
   const mine = m.role === 'human' && (!m.who || m.who === myName);
   const other = m.role === 'human' && !mine;
 
   const row = document.createElement('div');
+  if (m.id) row.dataset.id = String(m.id);
   row.className = 'row' + (mine ? ' mine' : '') + (other ? ' other' : '');
   if (other && m.who) {
     const a = document.createElement('div');
@@ -354,9 +420,37 @@ function addMsg(m, isErr) {
   b.className = 'bubble' + (isErr ? ' err' : '');
   b.textContent = m.text;                    // textContent: câu trả lời của model
   row.appendChild(b);                        // là nội dung không đáng tin
-  $('chat-view').appendChild(row);
-  scrollDown();
+
+  // Chèn ĐÚNG CHỖ theo id, không phải cứ nối vào đuôi: tin tới muộn (mạng chậm,
+  // hoặc vừa nối lại sau khi rớt) phải nằm đúng vị trí của nó trong cuộc trò chuyện.
+  const feed = $('chat-view');
+  let before = null;
+  if (m.id) {
+    for (const r of feed.querySelectorAll('.row[data-id]')) {
+      if (Number(r.dataset.id) > m.id) { before = r; break; }
+    }
+  }
+  feed.insertBefore(row, before);
+  if (!before) scrollDown();
   return b;
+}
+
+// ── Alice đang làm gì ───────────────────────────────────────────────────────
+function showActivity(label) {
+  let el = $('activity');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'typing';
+    el.id = 'activity';
+    $('chat-view').appendChild(el);
+  }
+  el.textContent = `Alice ${label}`;
+  scrollDown();
+}
+
+function clearActivity() {
+  const el = $('activity');
+  if (el) el.remove();
 }
 
 function scrollDown() {
@@ -370,22 +464,18 @@ function autoGrow() {
 }
 msg.addEventListener('input', autoGrow);
 
-let busy = false;
+let sending = false;
 async function send() {
   const text = msg.value.trim();
-  if (!text || busy) return;
+  if (!text || sending) return;
   msg.value = '';
   autoGrow();
-  addMsg({ role: 'human', text, who: myName });
-  busy = true;
+  sending = true;
   $('send').disabled = true;
 
-  const typing = document.createElement('div');
-  typing.className = 'typing';
-  typing.textContent = 'Alice đang trả lời…';
-  $('chat-view').appendChild(typing);
-  scrollDown();
-
+  // KHÔNG tự vẽ tin của mình nữa. Máy chủ lưu, gán id, rồi phát cho CẢ PHÒNG —
+  // kể cả máy vừa gửi. Tự vẽ trước là mỗi máy có một thứ tự riêng, và đó chính là
+  // gốc của "thứ tự chat lộn xộn, không đồng bộ".
   try {
     const r = await fetch(API + '/v1/chat', {
       method: 'POST',
@@ -393,30 +483,39 @@ async function send() {
       body: JSON.stringify({ message: text }),
     });
     const d = await r.json().catch(() => ({}));
-    typing.remove();
     if (!r.ok) {
       addMsg({ role: 'alice', text: d.error || 'Có lỗi không rõ.' }, true);
       if (r.status === 401) {
         token = null;
         myName = null;
         localStorage.removeItem('alice-token');
+        if (es) es.close();
         $('chat-view').hidden = true;
         $('compose').hidden = true;
         showGate();
       }
       return;
     }
-    addMsg({ role: 'alice', text: d.text });
+    // Mạng chậm thì SSE có thể tới sau; hỏi thẳng kho cho chắc.
+    catchUp();
   } catch {
-    typing.remove();
-    addMsg({ role: 'alice', text: 'Không kết nối được máy chủ.' }, true);
+    addMsg({ role: 'alice', text: 'Không gửi được — kiểm tra kết nối.' }, true);
+    msg.value = text;   // trả lại chữ đã gõ, đừng bắt gõ lại
+    autoGrow();
   } finally {
-    busy = false;
+    sending = false;
     $('send').disabled = false;
   }
 }
 
 $('send').onclick = send;
+$('at-btn').onclick = () => {
+  if (!msg.value.trimStart().startsWith(MENTION)) {
+    msg.value = `${MENTION} ${msg.value.trimStart()}`;
+    autoGrow();
+  }
+  msg.focus();
+};
 msg.addEventListener('keydown', (e) => {
   // Máy tính: Enter gửi, Shift+Enter xuống dòng. Điện thoại: nút "gửi" trên bàn
   // phím cũng bắn Enter, nên cùng một luật.

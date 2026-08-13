@@ -115,7 +115,12 @@ async function renderDashboard() {
       <div class="card-dir" title="${escapeHtml(a.dir)}">${escapeHtml(a.dir)}</div>
       ${status}
       ${pub}
-      <button class="btn ghost card-pub" data-pub="${escapeHtml(a.id)}" style="padding:6px 14px; font-size:11.5px">${a.public && a.public.enabled ? 'Quản lý máy chủ…' : 'Public Alice…'}</button>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:center">
+        <button class="btn ghost card-pub" data-pub="${escapeHtml(a.id)}" style="padding:6px 14px; font-size:11.5px">${a.public && a.public.enabled ? 'Quản lý máy chủ…' : 'Public Alice…'}</button>
+        ${(a.id === active || (a.public && a.public.enabled))
+          ? `<button class="btn ghost card-stop" data-stop="${escapeHtml(a.id)}" style="padding:6px 14px; font-size:11.5px">Tắt Alice này</button>`
+          : ''}
+      </div>
     </div>`;
   }).join('');
   for (const card of $('dash-grid').querySelectorAll('.dash-card')) {
@@ -152,6 +157,19 @@ async function renderDashboard() {
       e.stopPropagation();
       const alice = alices.find((a) => a.id === b.dataset.pub);
       await openPublicSheet(b.dataset.pub, alice ? alice.name : 'Alice');
+    };
+  }
+  for (const b of $('dash-grid').querySelectorAll('.card-stop')) {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const alice = alices.find((a) => a.id === b.dataset.stop);
+      if (!confirm(`Tắt Alice ${alice ? alice.name : 'này'}?\n\nAlice đó ngừng chạy lịch hẹn và ngừng phục vụ trang web công khai. Dữ liệu giữ nguyên — bấm vào thẻ là mở lại.`)) return;
+      b.disabled = true;
+      b.textContent = 'Đang tắt…';
+      const r = await window.alice.aliceStop(b.dataset.stop);
+      if (r.error) { alert(r.error); }
+      await renderDashboard();
+      await refreshHeader();
     };
   }
 }
@@ -274,8 +292,24 @@ function showTyping() {
   row.id = 'typing-row';
   row.innerHTML =
     `<div class="pic">${avatarUri ? `<img src="${avatarUri}" alt="">` : '★'}</div>` +
-    '<div class="typing"><i></i><i></i><i></i></div>';
+    '<div class="typing"><i></i><i></i><i></i></div>' +
+    '<div class="act" id="act-line" hidden></div>';
   feed.appendChild(row);
+  scrollDown();
+}
+
+/**
+ * Alice đang gọi công cụ gì.
+ *
+ * Ba chấm nhấp nháy không phân biệt được "đang nghĩ" với "đang chạy một lệnh 40
+ * giây" — và một lượt tra trí nhớ lâu nhìn y hệt một lượt treo, nên người dùng bấm
+ * dừng vì tưởng hỏng.
+ */
+function showActivity(label) {
+  const el = $('act-line');
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = label;
   scrollDown();
 }
 
@@ -1144,7 +1178,8 @@ $('sheet-close').addEventListener('click', closeSheet);
 $('sheet').addEventListener('click', (e) => { if (e.target === $('sheet')) closeSheet(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
-window.alice.onStream(({ partial }) => {
+window.alice.onStream(({ partial, activity }) => {
+  if (activity) { showActivity(activity); return; }
   if (!partial) return;
   hideTyping();
   if (!liveBubble) {
@@ -1182,10 +1217,13 @@ window.alice.onReady(() => { refreshHeader(); });
 
 window.alice.onAliceChanged(async (payload) => {
   if (payload && payload.id === null) {
-    // Xoá hết Alice → quay về dashboard, bắt buộc tạo Alice mới.
+    // Không còn Alice nào ĐANG MỞ. Hai trường hợp rất khác nhau:
+    //   - danh sách rỗng  → xoá hết rồi, bắt buộc tạo Alice mới;
+    //   - danh sách còn   → chỉ vừa TẮT một Alice, về dashboard là đủ. Bắt tạo mới
+    //     ở đây là dí một hộp thoại vào mặt người vừa bấm "tắt".
     showDashboard();
     await refreshHeader();
-    openCreateAlice(true);
+    if (!payload.alices || !payload.alices.length) openCreateAlice(true);
     return;
   }
   const hello = $('hello');

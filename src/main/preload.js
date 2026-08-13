@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('alice', {
   aliceCreate: (data) => ipcRenderer.invoke('alice:alice:create', data),
   aliceSelect: (id) => ipcRenderer.invoke('alice:alice:select', id),
   aliceRemove: (id) => ipcRenderer.invoke('alice:alice:remove', id),
+  aliceStop: (id) => ipcRenderer.invoke('alice:alice:stop', id),
   aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
   pickFolder: () => ipcRenderer.invoke('alice:folder:pick'),
   // Kiểm tra key TRƯỚC khi tạo Alice: đi một chiều như setApiKey, không đọc ngược ra.

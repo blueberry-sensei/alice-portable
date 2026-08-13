@@ -107,6 +107,9 @@ Một app Alice có thể chứa **nhiều Alice** — ví dụ *Alice GoDine* c
   vào đâu bạn muốn (ví dụ ngay trong thư mục dự án, hoặc một ổ khác cho đỡ chật).
   Trí nhớ, chìa khoá, brain và chỗ làm việc của Alice đều nằm gọn trong đó. Để
   trống thì Alice ở cạnh app như cũ;
+- **tắt riêng được** — bấm **Tắt Alice này** trên thẻ của nó: Alice đó ngừng chạy
+  lịch hẹn và ngừng phục vụ trang web công khai, nhưng app vẫn chạy và các Alice
+  khác không bị đụng tới. Dữ liệu giữ nguyên; bấm vào thẻ là mở lại;
 - **xoá được** — bấm **✕** ở góc thẻ Alice trên màn hình danh sách. Thư mục do
   **bạn tự chọn** thì app không tự xoá — nó chỉ gỡ Alice khỏi danh sách rồi chỉ
   cho bạn đường dẫn, vì đó có thể là thư mục đang chứa việc khác của bạn.
@@ -150,6 +153,19 @@ tải một lần rồi thôi.
 vào bằng link/mã, hoặc chính username nếu đăng nhập bằng tài khoản. Tên hiện trên
 đầu mỗi tin, nên đọc lại lịch sử vẫn biết câu nào của ai — và Alice cũng biết mình
 đang trả lời ai. Tên giữ nguyên khi tải lại trang.
+
+**Gọi Alice bằng `@alice`** — trang web công khai là một **phòng chat**: mọi người
+nói với nhau, tin hiện lên máy mọi người ngay lập tức, cùng một thứ tự. Alice chỉ
+trả lời khi được gọi tên (`@alice`, hoặc `@` + tên riêng của Alice đó). Bấm nút
+**@** cạnh ô nhập là chèn sẵn.
+
+> Im lặng **không phải** là không đọc. Những câu không gọi Alice vẫn được lưu, và
+> lần sau có ai gọi thì Alice đọc lại toàn bộ phần đó trước khi trả lời. Nhờ vậy
+> Alice không chen vào mọi câu (đỡ ồn, đỡ tốn API key) mà vẫn nắm được cả cuộc.
+
+**Alice đang làm gì** — khi Alice gọi công cụ, khung chat hiện đúng việc đang chạy:
+*đang tra trí nhớ*, *đang đọc file*, *đang chạy lệnh*… Một lượt lâu không còn nhìn
+giống một lượt treo.
 
 Vài điều nên biết: máy bạn phải **đang bật và đang mở Alice** thì người khác mới vào
 được; Alice trả lời **một lượt một người**, ai tới sau xếp hàng chờ; và mọi người vào
