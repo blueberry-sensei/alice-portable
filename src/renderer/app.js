@@ -34,6 +34,10 @@ if (!window.alice) {
     aliceSelect: async () => ({ ok: true }),
     aliceRemove: async () => ({ ok: true }),
     aliceSetModel: async () => ({ ok: true }),
+    aliceSetProvider: async () => ({ ok: true }),
+    claudeStatus: async () => ({ loggedIn: false }),
+    claudeLogin: async () => ({ ok: true }),
+    brainOpen: async () => ({ error: 'chế độ xem thử' }),
     pickFolder: async () => ({ canceled: true }),
     testApiKey: async () => ({ error: 'chế độ xem thử' }),
     publicToggle: async () => ({ ok: true }),
@@ -41,6 +45,7 @@ if (!window.alice) {
       enabled: false, mode: 'anyone', port: 8931, code: null, accounts: [],
       shareUrl: null, lanUrl: null, localUrl: '', lanUrls: [],
       tunnel: { running: false, starting: false, url: null, binary: null, error: null },
+      online: 0, joined: 0,
     }),
     publicSetMode: async () => ({ ok: true }),
     publicCodeRotate: async () => ({ code: '12345678' }),
@@ -65,7 +70,7 @@ if (!window.alice) {
     getSettings: async () => ({}),
     setSettings: async () => ({}),
       onStream: noop, onReady: (cb) => setTimeout(cb, 0),
-    onBusy: noop, onBrainError: noop, onFatal: noop,
+    onBusy: noop, onBrainError: noop, onFatal: noop, onPublicMessage: noop, onPublicBusy: noop,
   };
 }
 
@@ -287,6 +292,7 @@ function scrollDown() {
 }
 
 function showTyping() {
+  if ($('typing-row')) return; // đã hiện rồi — đừng tạo id trùng
   const row = document.createElement('div');
   row.className = 'row theirs';
   row.id = 'typing-row';
@@ -433,12 +439,36 @@ function closeSheet() {
  * ra là phải vào Cài đặt dán một chuỗi ký tự. Nên chặn ngay từ đầu, nói bằng tiếng
  * người, và cho đúng MỘT việc phải làm.
  */
+/**
+ * Chờ Bệ hạ đăng nhập xong trên trình duyệt — đăng nhập KHÔNG có sự kiện báo về
+ * app, nên phải tự hỏi lại `claude auth status` theo chu kỳ tới khi thấy
+ * `loggedIn`. Dừng sau `maxTries` (mặc định ~10 phút) — không chờ vô hạn nếu Bệ hạ
+ * bỏ dở giữa chừng.
+ */
+async function pollClaudeLogin(aliceId, onLoggedIn, { intervalMs = 3000, maxTries = 200 } = {}) {
+  for (let i = 0; i < maxTries; i += 1) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    let st;
+    try { st = await window.alice.claudeStatus(aliceId); } catch { continue; }
+    if (st && st.loggedIn) { onLoggedIn(st); return; }
+  }
+}
+
 async function openCreateAlice(required = false) {
   openSheet('Tạo Alice mới', 'Mỗi Alice là một trợ lý riêng: trí nhớ riêng, chìa khoá riêng, lịch hẹn riêng.', `
     <div class="field">
       <label for="ca-name">Tên của Alice</label>
       <input id="ca-name" type="text" placeholder="ví dụ: Alice GoDine" autofocus>
       <div class="desc">Đặt tên dễ nhận ra — mỗi Alice trong app này một tên khác nhau.</div>
+    </div>
+    <div class="field">
+      <label for="ca-provider">Chạy bằng</label>
+      <select id="ca-provider">
+        <option value="opencode">opencode (chìa khoá API riêng)</option>
+        <option value="claude">Claude Code (subscription, đăng nhập bằng claude login)</option>
+      </select>
+      <div class="desc" id="ca-provider-desc">opencode: dán API key ở dưới. Claude: không cần key,
+        chạy <code>claude login</code> trong terminal SAU KHI tạo Alice — app sẽ cho lệnh chính xác.</div>
     </div>
     <div class="field">
       <label for="ca-key">Chìa khoá (API key)</label>
@@ -475,10 +505,12 @@ async function openCreateAlice(required = false) {
   let keyOk = false;
 
   const syncCreateBtn = () => {
-    saveBtn.disabled = !(keyOk && $('ca-model').value && $('ca-name').value.trim());
-    saveBtn.title = saveBtn.disabled
-      ? 'Nhập tên, kiểm tra chìa khoá và chọn model trước đã'
-      : 'Tạo Alice';
+    const isClaude = $('ca-provider').value === 'claude';
+    const ready = isClaude
+      ? Boolean($('ca-name').value.trim())
+      : (keyOk && $('ca-model').value && $('ca-name').value.trim());
+    saveBtn.disabled = !ready;
+    saveBtn.title = ready ? 'Tạo Alice' : 'Nhập tên, kiểm tra chìa khoá và chọn model trước đã';
   };
   $('ca-name').addEventListener('input', syncCreateBtn);
   $('ca-model').addEventListener('change', syncCreateBtn);
@@ -487,6 +519,15 @@ async function openCreateAlice(required = false) {
     keyOk = false;
     $('ca-model').disabled = true;
     $('ca-model').innerHTML = '<option value="">(kiểm tra chìa khoá trước đã)</option>';
+    syncCreateBtn();
+  });
+  // Claude không cần key/model lúc tạo — đăng nhập qua `claude login` sau, model
+  // chọn mặc định. Ẩn hẳn hai field đó để khỏi gây hiểu nhầm là bắt buộc.
+  $('ca-provider').addEventListener('change', () => {
+    const isClaude = $('ca-provider').value === 'claude';
+    $('ca-key').closest('.field').hidden = isClaude;
+    $('ca-model').closest('.field').hidden = isClaude;
+    if (isClaude) keyOk = true;
     syncCreateBtn();
   });
   syncCreateBtn();
@@ -504,7 +545,7 @@ async function openCreateAlice(required = false) {
         return;
       }
       keyOk = true;
-      $('ca-key-desc').textContent = `Chìa khoá dùng được — ${r.models.length} model khả dụng (đã thử bằng ${r.tested}).`;
+      $('ca-key-desc').textContent = `Chìa khoá dùng được — ${r.models.length} model khả dụng.`;
       const sel = $('ca-model');
       sel.disabled = false;
       sel.innerHTML = [
@@ -535,11 +576,13 @@ async function openCreateAlice(required = false) {
     saveBtn.textContent = 'Đang tạo…';
     $('ca-msg').textContent = 'Đang dựng thư mục và trí nhớ cho Alice…';
     try {
+      const provider = $('ca-provider').value;
       const r = await window.alice.aliceCreate({
         name: $('ca-name').value,
-        key: $('ca-key').value,
-        model: $('ca-model').value || null,
+        key: provider === 'claude' ? '' : $('ca-key').value,
+        model: provider === 'claude' ? null : ($('ca-model').value || null),
         dir: $('ca-dir').value || null,
+        provider,
       });
       if (r.error) { $('ca-msg').textContent = r.error; return; }
       closeSheet();
@@ -547,6 +590,28 @@ async function openCreateAlice(required = false) {
       showChat();
       await refreshHeader();
       await loadHistory();
+      if (provider === 'claude' && r.alice) {
+        // Tự mở đăng nhập LUÔN — không bắt Bệ hạ tự gõ lệnh trong terminal.
+        setPinned('Đang mở đăng nhập Claude…',
+          'Trình duyệt sẽ tự mở để Bệ hạ đăng nhập. Đăng nhập xong quay lại app là dùng được ngay.');
+        const lr = await window.alice.claudeLogin(r.alice.id);
+        if (lr.error) {
+          setPinned('Không mở được đăng nhập Claude', escapeHtml(lr.error)
+            + ' — vào Cài đặt để thử lại.', true);
+        } else if (lr.url) {
+          setPinned('Đăng nhập Claude',
+            `Máy không tự mở được trình duyệt — bấm link này: <a href="${escapeHtml(lr.url)}" target="_blank" rel="noreferrer">${escapeHtml(lr.url)}</a>`,
+            true);
+        } else {
+          setPinned('Đang chờ đăng nhập Claude', 'Đăng nhập xong ở trình duyệt thì quay lại app, vào Cài đặt để kiểm tra trạng thái.');
+        }
+        if (!lr.error) {
+          pollClaudeLogin(r.alice.id, (st) => {
+            setPinned('Đã đăng nhập Claude',
+              `Xong rồi — <b>${escapeHtml(st.email || '')}</b> (${escapeHtml(st.subscriptionType || '')}). Chat được luôn.`);
+          });
+        }
+      }
     } catch (err) {
       $('ca-msg').textContent = `Không tạo được: ${String(err && err.message || err)}`;
     } finally {
@@ -562,6 +627,23 @@ async function openSettings() {
 
   // Model là của RIÊNG Alice này — không phải cài đặt chung.
   const currentModel = status.model || null;
+  const provider = status.provider || 'opencode';
+
+  const authFieldHtml = provider === 'claude'
+    ? `<div class="field">
+        <label>Đăng nhập Claude</label>
+        <div class="desc" id="s-claude-status">Đang kiểm tra…</div>
+        <button class="btn ghost" id="s-claude-login" style="margin-top:8px; padding:8px 16px; font-size:12.5px">Đăng nhập / đổi tài khoản…</button>
+      </div>`
+    : `<div class="field">
+        <label for="f-key">Chìa khoá (API key) của Alice này</label>
+        <input id="f-key" type="password" placeholder="${status.auth.configured ? 'đã có key — gõ vào đây để thay' : 'dán key vào đây'}" autocomplete="off">
+        <div class="desc">
+          ${status.auth.configured
+            ? `Đang dùng: <b>${status.auth.providers.map(escapeHtml).join(', ')}</b>.`
+            : 'Chưa có chìa khoá. Alice chỉ chạy với chìa khoá dán vào ô trên.'}
+        </div>
+      </div>`;
 
   openSheet('Cài đặt', 'Đổi ảnh, chọn model, quản lý lịch hẹn — tất cả là của riêng Alice này.', `
     <div class="field">
@@ -582,14 +664,11 @@ async function openSettings() {
       <select id="f-model"><option value="">(đang tải danh sách model…)</option></select>
       <div class="desc" id="f-model-desc">Để trống, Alice tự chọn model tốt nhất còn dùng được.</div>
     </div>
+    ${authFieldHtml}
     <div class="field">
-      <label for="f-key">Chìa khoá (API key) của Alice này</label>
-      <input id="f-key" type="password" placeholder="${status.auth.configured ? 'đã có key — gõ vào đây để thay' : 'dán key vào đây'}" autocomplete="off">
-      <div class="desc">
-        ${status.auth.configured
-          ? `Đang dùng: <b>${status.auth.providers.map(escapeHtml).join(', ')}</b>.`
-          : 'Chưa có chìa khoá. Alice chỉ chạy với chìa khoá dán vào ô trên.'}
-      </div>
+      <label>Trí nhớ (Alice Brain)</label>
+      <button class="btn ghost" id="s-brain-open" style="width:100%; padding:9px 14px; font-size:12.5px">Xem Alice Brain…</button>
+      <div class="desc" id="s-brain-desc">Dashboard đầy đủ: model trích xuất tri thức, embedding, đồ thị tri thức, telemetry.</div>
     </div>
     <div class="field">
       <label>Lịch hẹn</label>
@@ -602,12 +681,14 @@ async function openSettings() {
       <div class="desc">Xoá hết những gì đã nói với Alice này. Không lấy lại được.</div>
     </div>
   `, async () => {
-    const key = $('f-key').value.trim();
-    if (key) {
-      // Provider suy từ model đang chọn (`opencode/…` → `opencode`); không có thì
-      // mặc định `opencode` vì đó là Zen.
-      const provider = ($('f-model').value.split('/')[0]) || 'opencode';
-      await window.alice.setApiKey(provider, key);
+    if (provider === 'opencode') {
+      const key = $('f-key').value.trim();
+      if (key) {
+        // Provider suy từ model đang chọn (`opencode/…` → `opencode`); không có thì
+        // mặc định `opencode` vì đó là Zen.
+        const p = ($('f-model').value.split('/')[0]) || 'opencode';
+        await window.alice.setApiKey(p, key);
+      }
     }
     const model = $('f-model').value || null;
     if (model !== currentModel) {
@@ -617,6 +698,56 @@ async function openSettings() {
   });
 
   loadModelsInto($('f-model'), $('f-model-desc'), currentModel);
+  if (provider === 'claude') {
+    const refreshClaudeStatus = () => window.alice.claudeStatus(status.active).then((st) => {
+      const el = $('s-claude-status');
+      if (!el) return;
+      el.innerHTML = st.loggedIn
+        ? `Đã đăng nhập: <b>${escapeHtml(st.email || '')}</b> (${escapeHtml(st.subscriptionType || '')})`
+        : 'Chưa đăng nhập — bấm nút bên dưới.';
+    });
+    refreshClaudeStatus();
+    $('s-claude-login').onclick = async () => {
+      const btn = $('s-claude-login');
+      btn.disabled = true;
+      btn.textContent = 'Đang mở trình duyệt…';
+      const lr = await window.alice.claudeLogin(status.active);
+      const el = $('s-claude-status');
+      if (lr.error) {
+        el.textContent = lr.error;
+        btn.disabled = false;
+        btn.textContent = 'Đăng nhập / đổi tài khoản…';
+        return;
+      }
+      if (lr.url) {
+        el.innerHTML = `Máy không tự mở được trình duyệt — bấm link này: <a href="${escapeHtml(lr.url)}" target="_blank" rel="noreferrer">${escapeHtml(lr.url)}</a>`;
+      } else {
+        el.textContent = 'Đã mở trình duyệt — đang chờ Bệ hạ đăng nhập xong…';
+      }
+      btn.textContent = 'Đang chờ đăng nhập…';
+      // Đăng nhập KHÔNG có sự kiện báo về — tự hỏi lại tới khi thấy loggedIn. Sheet
+      // có thể đã đóng lúc xong (Bệ hạ đăng nhập chậm) — `el`/`btn` khi đó là node
+      // đã tách khỏi DOM, gán `.textContent` vào đó vô hại, chỉ đơn giản không ai
+      // thấy; KHÔNG dùng lại biến `status`/`el` cũ để đọc, chỉ để ghi.
+      await pollClaudeLogin(status.active, (st) => {
+        el.innerHTML = `Đã đăng nhập: <b>${escapeHtml(st.email || '')}</b> (${escapeHtml(st.subscriptionType || '')})`;
+      });
+      btn.disabled = false;
+      btn.textContent = 'Đăng nhập / đổi tài khoản…';
+    };
+  }
+
+  $('s-brain-open').onclick = async () => {
+    const btn = $('s-brain-open');
+    const desc = $('s-brain-desc');
+    btn.disabled = true;
+    btn.textContent = 'Đang mở…';
+    const r = await window.alice.brainOpen(status.active);
+    btn.disabled = false;
+    btn.textContent = 'Xem Alice Brain…';
+    if (r.error) { desc.textContent = r.error; return; }
+    desc.textContent = 'Đã mở trong trình duyệt. Lần đầu mở của Alice này thì tự tạo một tài khoản LOCAL trên đúng trang login.';
+  };
 
   $('s-sched').onclick = openSchedules;
 
@@ -707,6 +838,11 @@ async function openPublicSheet(id, name) {
       <div class="desc" id="pu-msg"></div>
     </div>
 
+    <div class="field" id="pu-stats-wrap" hidden>
+      <label>Người đang chat</label>
+      <div class="desc" id="pu-stats" style="margin-top:0"></div>
+    </div>
+
     <div class="field">
       <label>Ai được vào chat?</label>
       <label class="pu-radio"><input type="radio" name="pu-mode" value="anyone"> <span>Ai có link hoặc mã QR đều vào được <i>— chỉ nên dùng trong nhà, cùng wifi</i></span></label>
@@ -792,6 +928,14 @@ async function openPublicSheet(id, name) {
     $('pu-code-wrap').hidden = r.mode !== 'code';
     $('pu-acc-wrap').hidden = r.mode !== 'account';
     $('pu-net-wrap').hidden = !r.enabled;
+    $('pu-stats-wrap').hidden = !r.enabled;
+    if (r.enabled) {
+      const online = r.online || 0;
+      const joined = r.joined || 0;
+      $('pu-stats').textContent = joined
+        ? `${joined} người đã tham gia · ${online} đang mở trang`
+        : 'Chưa có ai vào — chia sẻ link hoặc mã QR bên dưới.';
+    }
     if (r.mode === 'code') $('pu-code').textContent = r.code || '--------';
 
     $('pu-accounts').innerHTML = (r.accounts || []).length
@@ -836,6 +980,20 @@ async function openPublicSheet(id, name) {
     }
   };
   await refresh();
+
+  // Số người đang chat đổi theo thời gian thực (khách vào/ra) — vòng lặp tự dừng
+  // khi tấm sheet đã đóng, không cần một chỗ "onClose" chung cho mọi sheet.
+  const statsTimer = setInterval(async () => {
+    if (!$('sheet').classList.contains('open')) { clearInterval(statsTimer); return; }
+    const r = await window.alice.publicInfo(id);
+    if (!r.error && r.enabled) {
+      const online = r.online || 0;
+      const joined = r.joined || 0;
+      $('pu-stats').textContent = joined
+        ? `${joined} người đã tham gia · ${online} đang mở trang`
+        : 'Chưa có ai vào — chia sẻ link hoặc mã QR bên dưới.';
+    }
+  }, 4000);
 
   $('pu-toggle').onclick = async () => {
     const infoNow = await window.alice.publicInfo(id);
@@ -1148,10 +1306,19 @@ async function refreshHeader() {
 }
 
 async function loadHistory() {
-  const rows = await window.alice.history(80);
-  if (!rows.length) return;
+  // XOÁ TRƯỚC rồi mới nạp — không thì bất kỳ chỗ nào gọi lại `loadHistory()` trên
+  // một feed đã có sẵn (bấm lại card Alice đang mở, đổi Alice rồi đổi lại…) là
+  // NỐI THÊM một bản y hệt, tin nhắn nhân đôi (đo thật 2026-08-13: gõ 1 câu, quay
+  // lại màn Dashboard rồi bấm vào card Alice đang mở lần nữa → thấy đúng câu đó
+  // hiện hai lần). Giữ lại tham chiếu `hello` TRƯỚC khi xoá — `innerHTML = ''` gỡ
+  // nó khỏi DOM nhưng biến JS vẫn dùng lại (append lại) được bình thường.
   const hello = $('hello');
-  if (hello) hello.remove();
+  feed.innerHTML = '';
+  const rows = await window.alice.history(80);
+  if (!rows.length) {
+    if (hello) feed.appendChild(hello);
+    return;
+  }
   for (const r of rows) addMessage(r.role, r.text, { ts: r.ts });
 }
 
@@ -1250,6 +1417,27 @@ window.alice.onUpdate((status) => {
 window.alice.onBusy((msg) => {
   if (msg) setPinned('Đang chuẩn bị', escapeHtml(msg));
   else refreshHeader();
+});
+
+// Khách vừa nhắn qua trang chat công khai (điện thoại quét mã) — main đã lọc
+// đúng Alice đang mở mới gửi sự kiện này, nên ở đây chỉ cần đang ở màn chat.
+window.alice.onPublicMessage(({ message }) => {
+  if (!inChat || !message) return;
+  addMessage(message.role, message.text, { ts: message.ts });
+});
+
+// Khách gõ @alice trên trang public — vẽ đúng ba chấm nhấp nháy trong app, y hệt
+// lúc Bệ hạ tự chat. Không dùng `setBusy()`: đó là khoá nút gửi của Ô CHAT TRONG
+// APP, hai lượt (app tự chat / khách qua public) chạy song song trên hai engine
+// khác nhau, khoá nhầm là Bệ hạ không gõ được trong lúc khách đang chờ trả lời.
+window.alice.onPublicBusy(({ busy, activity }) => {
+  if (!inChat) return;
+  if (busy) {
+    showTyping();
+    if (activity) showActivity(activity);
+  } else {
+    hideTyping();
+  }
 });
 
 window.alice.onBrainError((msg) => {

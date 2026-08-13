@@ -59,6 +59,37 @@ test('không khai MCP nào khi brain chưa sẵn sàng — thà thiếu còn hơ
   assert.deepEqual(cfg.mcp, {});
 });
 
+test('provisionWorkspace: sinh hook SessionStart cho Claude Code — không matcher, bắt cả compact', () => {
+  const dir = provisionWorkspace(
+    { contextCeiling: 1000, windowRatio: 0.6, compactRatio: 0.8, keepVerbatim: 4 },
+    { dir: path.join(sandbox, 'ws-claude-hook') }
+  );
+
+  const settingsPath = path.join(dir, '.claude', 'settings.json');
+  assert.ok(fs.existsSync(settingsPath), 'phải sinh .claude/settings.json');
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  const hookEntry = settings.hooks.SessionStart[0];
+  assert.equal(hookEntry.matcher, undefined, 'bỏ trống matcher — bắt mọi nguồn kể cả compact');
+  assert.match(hookEntry.hooks[0].command, /reload-skill\.js/);
+
+  const hookScript = path.join(dir, '.claude-hooks', 'reload-skill.js');
+  assert.ok(fs.existsSync(hookScript), 'phải sinh script hook');
+});
+
+test('provisionWorkspace: hook reload-skill.js in ĐÚNG nội dung AGENTS.md ra stdout', () => {
+  const dir = provisionWorkspace(
+    { contextCeiling: 1000, windowRatio: 0.6, compactRatio: 0.8, keepVerbatim: 4 },
+    { dir: path.join(sandbox, 'ws-claude-hook-2') }
+  );
+  const hookScript = path.join(dir, '.claude-hooks', 'reload-skill.js');
+  const out = require('node:child_process').execFileSync(
+    process.execPath, [hookScript], { cwd: dir, encoding: 'utf8' }
+  );
+  const agentsMd = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.match(out, /<alice-workspace-reload>/);
+  assert.ok(out.includes(agentsMd.trim().slice(0, 200)), 'phải chứa nội dung AGENTS.md');
+});
+
 test.after(() => {
   fs.rmSync(sandbox, { recursive: true, force: true });
 });

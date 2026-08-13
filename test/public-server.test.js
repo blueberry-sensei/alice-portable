@@ -12,13 +12,14 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { PublicServer, hashPassword, MAX_BODY } = require('../src/main/public-server');
+const { Store } = require('../src/main/memory/store');
 
 function tmpBase() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-pub-'));
   return path.join(dir, 'alice');
 }
 
-function makeServer(baseDir) {
+function makeServer(baseDir, extra = {}) {
   fs.mkdirSync(baseDir, { recursive: true });
   const settings = { contextCeiling: 1000, windowRatio: 0.6, compactRatio: 0.8, keepVerbatim: 4, rotateDaily: true };
   const alice = { id: 'a1', name: 'Alice Test' };
@@ -31,6 +32,7 @@ function makeServer(baseDir) {
   const server = new PublicServer({
     alice, baseDir, settings, engine, brainMcp: null,
     log: { info: () => {}, error: () => {} },
+    ...extra,
   });
   server.saveConfig({ enabled: false, mode: 'anyone', port: 0, accounts: [] });
   return server;
@@ -482,6 +484,35 @@ test('phòng chat: câu KHÔNG gọi @alice thì Alice im, nhưng vẫn lưu và
   }
 });
 
+test('phòng chat: gọi @alice — tin người gửi phải phát TRƯỚC báo "đang trả lời", không phải sau', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    // Bug đã đo thật (2026-08-13): `busy:true` phát ngay khi vào lượt, còn tin của
+    // người gửi chỉ phát SAU KHI Alice trả lời xong — nên trang web vẽ "Alice đang
+    // trả lời…" ở TRÊN tin vừa gõ. Đúng thứ tự phải là: hello, tin người gửi, rồi
+    // mới tới busy.
+    const events = await readEvents(port, 3, null, () => {
+      fetch(`http://127.0.0.1:${port}/v1/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '@alice ơi' }),
+      });
+    });
+
+    assert.equal(events[0].type, 'hello');
+    assert.equal(events[1].type, 'message', 'tin người gửi phải tới TRƯỚC busy');
+    assert.equal(events[1].message.role, 'human');
+    assert.equal(events[1].message.text, '@alice ơi');
+    assert.equal(events[2].type, 'busy');
+    assert.equal(events[2].busy, true);
+  } finally {
+    server.stop();
+  }
+});
+
 test('phòng chat: gọi @alice thì Alice đọc LẠI hết những câu chưa đọc', async () => {
   const base = tmpBase();
   const server = makeServer(base);
@@ -599,6 +630,196 @@ test('phòng chat: mode code — chưa vào cửa thì không mở được dòn
     // EventSource không gắn được header → token đi qua query.
     const ok = await readEvents(port, 1, token);
     assert.equal(ok[0].type, 'hello');
+  } finally {
+    server.stop();
+  }
+});
+
+// ── đồng bộ app desktop ⇄ trang public (2026-08-13) ─────────────────────────
+//
+// Bệ hạ báo: chat trong app không hiện trên điện thoại (trang public), và chat
+// trên điện thoại không hiện trong app. Hai bên dùng CHUNG một `chat.db` (cùng
+// `baseDir`) nhưng là hai `Store` khác nhau, nên bên nào tự ghi thì chỉ bên đó
+// biết — không ai tự động báo cho bên kia để đẩy realtime.
+
+test('public server: broadcastFromDesktop — tin app chat trong lúc public phải lên trang web ngay, không cần tải lại', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    // Cần một hội thoại có thật trước đã (như khi khách đã chat ít nhất một câu).
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'khách chào trước' }),
+    });
+    const conv = server.store.currentConversation();
+    assert.ok(conv, 'phải có hội thoại để test broadcastFromDesktop');
+
+    // App desktop có `Store` RIÊNG nhưng trỏ CÙNG file `chat.db` — đúng kiến trúc
+    // thật (`activateAlice` và `publicServerFor` cùng dùng `path.join(base,
+    // 'chat.db')`). Giả lập Bệ hạ vừa gõ trong app.
+    const desktopStore = new Store(path.join(base, 'chat.db'));
+    let newId;
+    try {
+      newId = desktopStore.add({ convId: conv.id, role: 'human', text: 'Bệ hạ gõ trong app', delivered: true });
+    } finally {
+      desktopStore.close();
+    }
+
+    const events = await readEvents(port, 2, null, () => {
+      server.broadcastFromDesktop(conv.id, newId - 1);
+    });
+    assert.equal(events[0].type, 'hello');
+    assert.equal(events[1].type, 'message');
+    assert.equal(events[1].message.id, newId);
+    assert.equal(events[1].message.text, 'Bệ hạ gõ trong app', 'trang public phải thấy ĐÚNG câu app vừa gõ');
+  } finally {
+    server.stop();
+  }
+});
+
+test('public server: khách nhắn qua trang public thì onMessage báo cho app biết (để app vẽ ngay, không đợi đổi Alice qua lại)', async () => {
+  const base = tmpBase();
+  const seen = [];
+  const server = makeServer(base, { onMessage: (row) => seen.push(row) });
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    // Không gọi @alice — vẫn phải báo: im lặng khác mù, app phải biết ngay cả
+    // khi Alice chưa trả lời.
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'khách chào (không gọi alice)' }),
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].role, 'human');
+    assert.equal(seen[0].text, 'khách chào (không gọi alice)');
+
+    // Gọi @alice — cả tin khách lẫn câu trả lời đều phải báo cho app.
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '@alice trả lời đi' }),
+    });
+    await waitForAlice(port);
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(seen.length, 3, 'thêm đúng một tin khách + một tin Alice');
+    assert.equal(seen[1].role, 'human');
+    assert.equal(seen[2].role, 'alice');
+  } finally {
+    server.stop();
+  }
+});
+
+// ── typing indicator: app phải biết Alice đang trả lời khách trên trang public
+// (Bệ hạ báo 2026-08-13: mở public link, khách nhắn @alice, KHÔNG thấy typing ở
+// cả app lẫn trang web, dù câu trả lời vẫn tới sau đó). Gốc rễ ở app: `onMessage`
+// chỉ báo khi có TIN, không báo trạng thái "đang trả lời" — nên thêm `onBusy`.
+
+test('public server: onBusy báo app biết Alice ĐANG trả lời khách trên trang public, rồi báo hết bận', async () => {
+  const base = tmpBase();
+  const seen = [];
+  const server = makeServer(base, { onBusy: (busy, activity) => seen.push({ busy, activity }) });
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    // Không gọi @alice — không có lượt nào chạy, không được báo bận.
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'khách chào (không gọi alice)' }),
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(seen.length, 0, 'im lặng thì không có lượt nào để báo bận');
+
+    // Gọi @alice — phải thấy busy:true TRƯỚC, rồi busy:false SAU khi xong.
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '@alice trả lời đi' }),
+    });
+    await waitForAlice(port);
+    await new Promise((r) => setTimeout(r, 80));
+
+    assert.ok(seen.length >= 2, `phải có ít nhất một cặp busy true/false, nhận: ${JSON.stringify(seen)}`);
+    assert.equal(seen[0].busy, true, 'phải báo bận NGAY khi bắt đầu lượt');
+    assert.equal(seen[seen.length - 1].busy, false, 'phải báo hết bận khi xong lượt');
+  } finally {
+    server.stop();
+  }
+});
+
+// ── gợi ý @mention: trang public phải biết Alice này nhận những tên gọi nào ────
+
+test('public server: /v1/who trả kèm handles để trang web gợi ý khi gõ @', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+  try {
+    const who = await (await fetch(`http://127.0.0.1:${port}/v1/who`)).json();
+    assert.ok(Array.isArray(who.handles), 'phải có mảng handles');
+    assert.ok(who.handles.includes('alice'), '"alice" luôn phải nhận được');
+  } finally {
+    server.stop();
+  }
+});
+
+test('public server: /v1/who — Alice có tên riêng thì handles có thêm alias rút gọn', async () => {
+  const base = tmpBase();
+  fs.mkdirSync(base, { recursive: true });
+  const settings = { contextCeiling: 1000, windowRatio: 0.6, compactRatio: 0.8, keepVerbatim: 4, rotateDaily: true };
+  const alice = { id: 'a2', name: 'Alice K-OS' };
+  const engine = { setBaseDir() {}, runWithFallback: async (opts) => ({ text: 'ok', model: 'fake/model', attempts: [] }) };
+  const server = new PublicServer({ alice, baseDir: base, settings, engine, brainMcp: null, log: { info: () => {}, error: () => {} } });
+  server.saveConfig({ enabled: false, mode: 'anyone', port: 0, accounts: [] });
+  const port = await freePort();
+  await server.start(port);
+  try {
+    const who = await (await fetch(`http://127.0.0.1:${port}/v1/who`)).json();
+    assert.ok(who.handles.includes('alice'));
+    assert.ok(who.handles.includes('kos'), `phải có alias rút gọn "kos", nhận: ${JSON.stringify(who.handles)}`);
+  } finally {
+    server.stop();
+  }
+});
+
+// ── bao nhiêu người đã join ────────────────────────────────────────────────
+
+test('public server: stats() đếm đúng người đang mở trang (online) và đã từng vào (joined)', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+  try {
+    assert.deepEqual(server.stats(), { online: 0, joined: 0 });
+
+    await (await fetch(`http://127.0.0.1:${port}/v1/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })).json();
+    await (await fetch(`http://127.0.0.1:${port}/v1/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })).json();
+    assert.equal(server.stats().joined, 2, 'hai lượt /v1/login = hai người đã join');
+    assert.equal(server.stats().online, 0, 'chưa ai mở kết nối SSE thì chưa tính "đang mở"');
+
+    // Mở một kết nối SSE THẬT và giữ nó sống để đếm "đang mở" ngay trong lúc mở.
+    const http = require('node:http');
+    await new Promise((resolve, reject) => {
+      const req = http.get(`http://127.0.0.1:${port}/v1/events`, (res) => {
+        res.once('data', () => {
+          assert.equal(server.stats().online, 1, 'đang có một kết nối SSE mở thì online phải là 1');
+          req.destroy();
+        });
+      });
+      req.on('close', resolve);
+      req.on('error', (e) => { if (e.code === 'ECONNRESET') resolve(); else reject(e); });
+    });
+    await new Promise((r) => setTimeout(r, 50)); // để server xử lý sự kiện 'close' của response
+    assert.equal(server.stats().online, 0, 'đóng kết nối rồi thì không còn tính là đang mở');
+    assert.equal(server.stats().joined, 2, 'đóng kết nối KHÔNG xoá phiên đã join');
   } finally {
     server.stop();
   }

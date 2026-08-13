@@ -9,11 +9,14 @@ const log = require('./log');
 const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { OpencodeEngine } = require('./engine/opencode');
+const { ClaudeEngine } = require('./engine/claude');
+const { execFile } = require('node:child_process');
 const { createTurnRunner } = require('./turn');
 const { provisionWorkspace } = require('./alice');
 const auth = require('./engine/auth');
 const avatar = require('./avatar');
 const { BrainSidecar } = require('./brain/sidecar');
+const { NextDashboard } = require('./brain/webui');
 const { Scheduler } = require('./scheduler');
 const { Updater } = require('./updater');
 const { PublicServer } = require('./public-server');
@@ -54,6 +57,16 @@ const publicServers = new Map();
 // Alice đang được chia sẻ ra INTERNET: id → Tunnel (cloudflared). Tách khỏi
 // publicServers vì máy chủ LAN sống được mà không cần tunnel.
 const tunnels = new Map();
+
+// Dashboard Alice Brain (Next.js) — MỘT tiến trình web cho cả app, vì
+// `NEXT_PUBLIC_API_BASE` đóng cứng lúc build (xem `docs/superpowers/specs/
+// 2026-08-13-brain-dashboard-design.md`). `dashboardSidecar` là `sag_api.desktop`
+// HTTP RIÊNG của Alice đang được xem — khác `brain` (biến toàn cục ở trên, chỉ lo
+// MCP stdio cho Alice đang mở trong app) để bấm "Xem Brain" của Alice B trong lúc
+// đang chat với Alice A không đụng brain của A.
+const dashboard = new NextDashboard();
+let dashboardSidecar = null;
+let dashboardAliceId = null;
 
 // Cửa sổ đóng (bấm X) chỉ ẨN app — chat app phải sống tiếp để nhận lịch hẹn và
 // không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
@@ -174,6 +187,13 @@ function aliceDirFor(id) {
   return a ? registryModule.dirOf(a) : config.aliceDir(id);
 }
 
+/** Engine ĐÚNG cho một Alice, theo `provider` của nó — mỗi Alice một instance
+ * riêng, không dùng chung: đổi provider giữa các Alice không lẫn state
+ * (`_cancelled`/`_child`) của nhau. */
+function engineFor(alice, forSettings) {
+  return alice.provider === 'claude' ? new ClaudeEngine(forSettings) : new OpencodeEngine(forSettings);
+}
+
 /** Nén bằng chính model đang dùng — dùng chung cho mọi Alice. */
 function makeSummarizer() {
   return async (messages) => {
@@ -205,6 +225,14 @@ async function activateAlice(id) {
   const alice = registry.alices.find((a) => a.id === id);
   if (!alice) throw new Error('Không tìm thấy Alice.');
 
+  // Có lượt đang chạy dở (Alice đang trả lời) thì KHÔNG được đóng store — lượt đó
+  // vẫn đang cầm `store`/`runTurn` cũ qua closure, đóng giữa chừng là đúng lỗi
+  // "database is not open" (đo thật 2026-08-13: gõ một câu, trong lúc đang chờ
+  // trả lời thì bấm quay lại Dashboard rồi chọn lại đúng Alice đó/Alice khác —
+  // `activateAlice` chạy lại, đóng store cũ, lượt cũ ghi câu trả lời vào store đã
+  // đóng thì vỡ). Bắt lỗi rõ ràng ở đây thay vì để nó vỡ âm thầm giữa chừng.
+  if (busy) throw new Error('Alice đang bận trả lời một lượt khác — đợi xong rồi đổi Alice nhé.');
+
   // Teardown bản cũ.
   if (scheduler) scheduler.stop();
   if (brain) brain.stop();
@@ -218,6 +246,9 @@ async function activateAlice(id) {
   registryModule.save(registry);
 
   const base = aliceDirFor(id);
+  // Engine RIÊNG cho Alice này, đúng provider — không tái dùng instance của Alice
+  // trước đó, vì đổi Alice có thể đồng thời đổi cả CLASS engine (opencode ↔ claude).
+  engine = engineFor(alice, settings);
   engine.setBaseDir(base);
   // Model là của RIÊNG Alice (chọn lúc tạo, đổi trong Settings của nó).
   engine.settings = { ...settings, model: alice.model || null };
@@ -272,7 +303,7 @@ async function boot() {
   registry = registryModule.load();
   if (!registry.alices.length) {
     // Lần đầu lên bản đa-Alice mà máy đang có dữ liệu cũ → gom thành Alice đầu tiên.
-    const migrated = registryModule.migrateLegacy({ name: config.appName() });
+    const migrated = await registryModule.migrateLegacy({ name: config.appName() });
     if (migrated) {
       registry = migrated;
       log.info(`migrated legacy data → Alice ${registry.active}`);
@@ -303,6 +334,7 @@ ipcMain.handle('alice:status', async () => {
     };
   }
   const base = registry.active ? aliceDirFor(registry.active) : null;
+  const activeProvider = (currentAlice() || {}).provider || 'opencode';
   return {
     root: config.ROOT,
     dataDir: config.DATA_DIR,
@@ -310,9 +342,15 @@ ipcMain.handle('alice:status', async () => {
     alices: registry.alices,
     active: registry.active,
     activeName: (currentAlice() || {}).name || null,
+    provider: activeProvider,
     engine: { path: engine.binPath, source: engine.binSource, available: engine.available },
     // Chỉ tên provider — không bao giờ kèm giá trị key (D-0004).
-    auth: base ? auth.authStatus(base) : { configured: false, providers: [] },
+    // Claude không có "chìa khoá" kiểu opencode — trạng thái đăng nhập thật nằm ở
+    // `alice:claude:status`, riêng. Ở đây báo `configured:true` để không hiện nhầm
+    // banner "thiếu chìa khoá" của luồng opencode.
+    auth: activeProvider === 'claude'
+      ? { configured: true, providers: ['claude'] }
+      : (base ? auth.authStatus(base) : { configured: false, providers: [] }),
     brain: brain ? brain.status() : { enabled: false },
     settings,
     conversation: store ? store.currentConversation() : null,
@@ -364,32 +402,24 @@ ipcMain.handle('alice:auth:test', async (_e, key) => {
     fs.rmSync(probe, { recursive: true, force: true });
     auth.setApiKey('opencode', k, probe);
 
+    // CHỈ hỏi danh sách model — không chạy thử một lượt chat thật (Bệ hạ chốt
+    // 2026-08-13: "kiểm tra" không được gọi model nào, tốn tiền/quota vô ích).
+    // Đọc được danh sách nghĩa là chìa khoá dùng được — cần đúng quyền mới truy
+    // vấn được danh sách của tài khoản, sai chìa khoá thì lệnh này tự hỏng.
     const models = await engine.listModels({ baseDir: probe, timeout: 45000 });
     if (!models.length) {
-      return { error: 'Không đọc được danh sách model — kiểm tra kết nối mạng rồi thử lại.' };
+      return { error: 'Không đọc được danh sách model — kiểm tra kết nối mạng hoặc chìa khoá rồi thử lại.' };
     }
-
-    // Model rẻ nhất để thử: ưu tiên bản free trong danh sách thật.
-    const free = models.find((m) => /-free$/.test(m)) || models[0];
-    try {
-      await engine.run({
-        message: 'ping', sessionId: null, model: free, cwd: probe,
-        baseDir: probe, idleMs: 45000,
-      });
-    } catch (err) {
-      if (err.cancelled) return { error: 'Đã huỷ.' };
-      const why = String(err.message || err);
-      // Lỗi xác thực nói rõ là chìa khoá sai; lỗi khác thì nói nguyên văn, đừng
-      // đổ oan cho cái key khi thật ra là mạng hỏng hay model chết.
-      if (/401|403|unauthor|invalid.*key|api key|forbidden/i.test(why)) {
-        return { error: 'Chìa khoá không dùng được — kiểm tra lại rồi dán lần nữa.' };
-      }
-      return { error: `Thử chìa khoá không xong: ${why.slice(0, 300)}` };
-    }
-    log.info(`auth test ok: ${models.length} model, ping bằng ${free}`);
-    return { ok: true, models, tested: free };
+    log.info(`auth test ok: ${models.length} model`);
+    return { ok: true, models };
   } catch (err) {
-    return { error: String(err.message || err) };
+    const why = String(err.message || err);
+    // Lỗi xác thực nói rõ là chìa khoá sai; lỗi khác thì nói nguyên văn, đừng đổ
+    // oan cho cái key khi thật ra là mạng hỏng.
+    if (/401|403|unauthor|invalid.*key|api key|forbidden/i.test(why)) {
+      return { error: 'Chìa khoá không dùng được — kiểm tra lại rồi dán lần nữa.' };
+    }
+    return { error: why };
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }
@@ -404,20 +434,31 @@ ipcMain.handle('alice:folder:pick', async () => {
   return { dir: res.filePaths[0] };
 });
 
-ipcMain.handle('alice:alice:create', async (_e, { name, key, model, dir }) => {
+ipcMain.handle('alice:alice:create', async (_e, { name, key, model, dir, provider }) => {
   const boom = await ready();
   if (boom) return { error: `App chưa khởi động được: ${boom}` };
   const nameT = String(name || '').trim();
+  const providerT = provider === 'claude' ? 'claude' : 'opencode';
   const keyT = String(key || '').trim();
   if (!nameT) return { error: 'Nhập tên cho Alice.' };
-  if (!keyT) return { error: 'Alice cần một chìa khoá riêng.' };
+  // Claude dùng subscription (đăng nhập bằng `claude login`, cô lập theo Alice) —
+  // không có API key để bắt buộc như opencode.
+  if (providerT === 'opencode' && !keyT) return { error: 'Alice cần một chìa khoá riêng.' };
   const dirT = String(dir || '').trim();
   if (dirT && !fs.existsSync(dirT)) return { error: `Không thấy thư mục: ${dirT}` };
-  const { state, alice } = registryModule.create({
-    name: nameT, key: keyT, model: model || null, dir: dirT || null,
-  });
+  let state;
+  let alice;
+  try {
+    ({ state, alice } = registryModule.create({
+      name: nameT, key: keyT, model: model || null, dir: dirT || null, provider: providerT,
+    }));
+  } catch (err) {
+    // Trùng thư mục với Alice khác (cùng danh sách, hoặc dấu vết của bản cài
+    // khác) — registry.create() từ chối thẳng, không âm thầm tạo đè lên.
+    return { error: String(err.message || err) };
+  }
   registry = state;
-  log.info(`alice created: ${alice.id} (${alice.name}) model=${alice.model || 'auto'} dir=${alice.dir || 'mặc định'}`);
+  log.info(`alice created: ${alice.id} (${alice.name}) provider=${alice.provider} model=${alice.model || 'auto'} dir=${alice.dir || 'mặc định'}`);
   try {
     await activateAlice(alice.id);
   } catch (err) {
@@ -436,6 +477,118 @@ ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
     engine.settings = { ...engine.settings, model: model || null };
   }
   return { ok: true };
+});
+
+ipcMain.handle('alice:alice:set-provider', async (_e, id, provider) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  const providerT = provider === 'claude' ? 'claude' : 'opencode';
+  const { state, updated } = registryModule.update(id, { provider: providerT });
+  if (!updated) return { error: 'Không tìm thấy Alice.' };
+  registry = state;
+  if (registry.active === id) await activateAlice(id); // đổi engine ngay, không đợi restart
+  return { ok: true };
+});
+
+/** Trạng thái đăng nhập Claude của MỘT Alice — đọc qua `claude auth status` với
+ * `CLAUDE_CONFIG_DIR` cô lập của chính Alice đó, không đụng đăng nhập global. */
+ipcMain.handle('alice:claude:status', async (_e, id) => {
+  const alice = registry.alices.find((a) => a.id === id);
+  if (!alice) return { error: 'Không tìm thấy Alice.' };
+  const base = aliceDirFor(id);
+  const configDir = registryModule.claudeConfigDir(base);
+  return new Promise((resolve) => {
+    execFile('claude', ['auth', 'status'], {
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }, timeout: 10000,
+    }, (err, stdout) => {
+      if (err) { resolve({ loggedIn: false, error: 'Chưa cài `claude` hoặc chưa đăng nhập.' }); return; }
+      try { resolve(JSON.parse(stdout)); } catch { resolve({ loggedIn: false }); }
+    });
+  });
+});
+
+/**
+ * Mở luồng đăng nhập Claude CHO Bệ hạ — tự spawn `claude auth login`, tự mở trình
+ * duyệt (CLI tự làm việc đó), không bắt gõ lệnh trong terminal.
+ *
+ * Không đợi tiến trình con thoát: đăng nhập cần Bệ hạ bấm "Cho phép" trên trình
+ * duyệt, có thể mất cả phút. Chỉ đợi vài giây đầu để bắt URL PHÒNG KHI máy không tự
+ * mở được trình duyệt mặc định — có URL thì UI vẫn đưa ra để Bệ hạ tự bấm.
+ */
+ipcMain.handle('alice:claude:login', async (_e, id) => {
+  const alice = registry.alices.find((a) => a.id === id);
+  if (!alice) return { error: 'Không tìm thấy Alice.' };
+  const base = aliceDirFor(id);
+  const configDir = registryModule.claudeConfigDir(base);
+  fs.mkdirSync(configDir, { recursive: true });
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let child;
+    try {
+      child = require('node:child_process').spawn('claude', ['auth', 'login', '--claudeai'], {
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+        windowsHide: true,
+      });
+    } catch (err) {
+      resolve({ error: `Không chạy được claude: ${err.message}` });
+      return;
+    }
+    child.on('error', (err) => {
+      if (!settled) { settled = true; resolve({ error: `Không chạy được claude: ${err.message}` }); }
+    });
+    let buf = '';
+    let url = null;
+    child.stdout.on('data', (d) => {
+      buf += d.toString('utf8');
+      const m = buf.match(/https?:\/\/\S+/);
+      if (m && !url) url = m[0];
+    });
+    setTimeout(() => {
+      if (!settled) { settled = true; resolve({ ok: true, url }); }
+    }, 2000);
+    child.unref();
+  });
+});
+
+/**
+ * Mở dashboard Alice Brain THẬT (`apps/web` gốc, vendor sẵn) cho một Alice.
+ *
+ * `NEXT_PUBLIC_API_BASE` đóng cứng lúc build vào cổng 8932 (xem
+ * `docs/superpowers/specs/2026-08-13-brain-dashboard-design.md`) — nên chỉ CHỈNH
+ * `sag_api.desktop` đang phục vụ cổng đó là Alice nào, KHÔNG đổi cổng của Next.js.
+ * Đổi Alice đang xem = tắt sidecar cũ, bật sidecar mới của Alice khác trên
+ * ĐÚNG cổng đó; Next.js chỉ khởi một lần, dùng lại cho mọi Alice.
+ */
+ipcMain.handle('alice:brain:open', async (_e, id) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  if (!dashboard.available) {
+    return { error: 'Bản cài này thiếu dashboard (runtime/webui) — build lại bằng npm run bundle:webui.' };
+  }
+  const alice = registry.alices.find((a) => a.id === id);
+  if (!alice) return { error: 'Không tìm thấy Alice.' };
+  const base = aliceDirFor(id);
+
+  try {
+    if (dashboardSidecar && dashboardAliceId !== id) {
+      dashboardSidecar.stop();
+      dashboardSidecar = null;
+    }
+    if (!dashboardSidecar) {
+      dashboardSidecar = new BrainSidecar(
+        { ...(settings.brain || {}), http: true, port: 8932 },
+        { dataDir: path.join(base, 'brain') }
+      );
+      await dashboardSidecar.start();
+      dashboardAliceId = id;
+    }
+    await dashboard.start();
+    shell.openExternal(dashboard.url);
+    return { ok: true, url: dashboard.url };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
 });
 
 ipcMain.handle('alice:alice:select', async (_e, id) => {
@@ -521,7 +674,7 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
   let state;
   let keptDir = null;
   try {
-    ({ state, removed, keptDir } = registryModule.remove(id));
+    ({ state, removed, keptDir } = await registryModule.remove(id));
   } catch (err) {
     // Xoá file hỏng thì Alice đã rời danh sách rồi — nói thẳng chỗ còn sót thay vì
     // để người dùng ngồi nhìn màn hình đứng im.
@@ -557,15 +710,36 @@ function publicServerFor(id) {
     if (!alice) throw new Error('Không tìm thấy Alice.');
     const base = aliceDirFor(id);
     const bs = new BrainSidecar(settings.brain || {}, { dataDir: path.join(base, 'brain') });
+    // Engine RIÊNG của máy chủ public, độc lập với engine của cửa sổ app — cùng
+    // Alice nhưng hai tiến trình engine khác nhau chạy song song (app + public).
+    const pubEngine = engineFor(alice, settings);
+    pubEngine.setBaseDir(base);
+    pubEngine.settings = { ...settings, model: alice.model || null };
     pub = new PublicServer({
       alice,
       baseDir: base,
       settings,
-      engine,
+      engine: pubEngine,
       brainMcp: bs.available ? bs.mcpConfig() : null,
       log,
       // Trang chat của khách hiện đúng ảnh của Alice này, không phải ngôi sao chung.
       avatar: () => avatar.current(base),
+      // Khách nhắn qua trang web công khai → nếu Alice này ĐANG MỞ trong app thì
+      // đẩy luôn vào cửa sổ, không thì Bệ hạ chỉ thấy sau khi tự đổi Alice đi rồi
+      // quay lại (đúng triệu chứng "chat trên điện thoại, app không thấy").
+      onMessage: (row) => {
+        if (registry.active === id && win && !win.isDestroyed()) {
+          win.webContents.send('alice:public-message', { aliceId: id, message: row });
+        }
+      },
+      // Khách nhắn qua trang public: app phải thấy "Alice đang trả lời…" y hệt lúc
+      // Bệ hạ tự chat trong app, không thì cửa sổ đứng im cho tới khi câu trả lời
+      // hiện ra — đúng triệu chứng "không thấy typing" (đo thật 2026-08-13).
+      onBusy: (busy, activity) => {
+        if (registry.active === id && win && !win.isDestroyed()) {
+          win.webContents.send('alice:public-busy', { aliceId: id, busy, activity });
+        }
+      },
     });
     publicServers.set(id, pub);
   }
@@ -708,6 +882,7 @@ ipcMain.handle('alice:public:info', async (_e, id) => {
       localUrl: `http://127.0.0.1:${port}`,
       lanUrls: shareableIps().map((ip) => `http://${ip}:${port}`),
       tunnel,
+      ...pub.stats(),
     };
   } catch (err) {
     return { error: String(err.message || err) };
@@ -968,6 +1143,8 @@ ipcMain.handle('alice:shutdown', async () => {
   tunnels.clear();
   for (const pub of publicServers.values()) pub.stop();
   publicServers.clear();
+  if (dashboardSidecar) { dashboardSidecar.stop(); dashboardSidecar = null; }
+  dashboard.stop();
   if (scheduler) scheduler.stop();
   if (brain) brain.stop();
   if (store) {
@@ -1023,6 +1200,19 @@ ipcMain.handle('alice:send', async (event, text) => {
       res.rotated ? `rotated=${res.rotated.reason}` : null,
       res.seeded ? 'seeded' : null,
     ].filter(Boolean).join(' '));
+    // Alice này đang public thì tin vừa chat trong app phải lên trang web NGAY —
+    // không thì máy đang xem trang public chỉ thấy sau khi tự tải lại (mất
+    // "realtime", đúng triệu chứng "chat trên app, điện thoại không thấy").
+    if (registry.active) {
+      const pub = publicServers.get(registry.active);
+      if (pub && pub.running) {
+        try {
+          pub.broadcastFromDesktop(res.conversationId, res.messageId - 1);
+        } catch (err) {
+          log.error(`public broadcast (app→web) failed: ${err.message}`);
+        }
+      }
+    }
     return res;
   } catch (err) {
     // Người dùng bấm dừng không phải một lỗi — UI không được vẽ nó thành bong bóng đỏ.

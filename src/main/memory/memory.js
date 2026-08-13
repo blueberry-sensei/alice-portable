@@ -17,6 +17,10 @@ const { randomUUID } = require('node:crypto');
  * Mồi (`seed`) = bản compact của hội thoại cũ + N tin gần nhất nguyên văn. Đây là
  * chỗ duy nhất trong app mà "quên" có thể xảy ra, nên nó có test riêng.
  */
+const ONE_HOUR_MS = 3600 * 1000;
+const SESSION_MAX_AGE_MS = 12 * ONE_HOUR_MS;
+const SESSION_IDLE_MS = ONE_HOUR_MS;
+
 class Memory {
   /**
    * @param {import('./store').Store} store
@@ -58,11 +62,12 @@ class Memory {
     const current = this.store.currentConversation();
 
     if (!current) {
-      return { conversation: this._fresh(day, null, ''), seed: null, reason: 'first-run' };
+      return { conversation: this._fresh(day, null, '', null, now), seed: null, reason: 'first-run' };
     }
 
-    const conversation = (this.settings.rotateDaily && current.day !== day)
-      ? (await this._rotate(current, day, 'daily')).conversation
+    const staleReason = this._staleReason(current, now, day);
+    const conversation = staleReason
+      ? (await this._rotate(current, day, staleReason, null, now)).conversation
       : current;
 
     // Mồi LUÔN đi qua đĩa, kể cả khi vừa sinh ra ở dòng trên. Một đường duy nhất
@@ -78,12 +83,33 @@ class Memory {
   }
 
   /**
+   * Vì sao phải xoay TRƯỚC khi chạy lượt này — rỗng = dùng tiếp session cũ.
+   *
+   * Ba trục, CỘNG DỒN (không thay nhau): hết ngày (`daily`), tràn context (kiểm ở
+   * `afterTurn`, không nằm ở đây), và MỚI — tuổi + im lặng (`stale`). Trục `stale`
+   * dùng AND, khác hai trục kia: một session 13 tiếng tuổi mà vẫn đang nhắn liên
+   * tục KHÔNG bị xoay — tuổi một mình không phải tín hiệu đủ, phải có khoảng dừng
+   * thật kèm theo (2026-08-13, tham khảo bài học đã trả giá ở
+   * `kd-reserve/automation`: OR thuần quá nhạy, phải nới ngưỡng sau khi cắt ngang
+   * cuộc đang nói dở — AND ngay từ đầu để khỏi lặp lại).
+   */
+  _staleReason(current, now, day) {
+    if (this.settings.rotateDaily && current.day !== day) return 'daily';
+    const ageMs = now.getTime() - current.created_at;
+    if (ageMs <= SESSION_MAX_AGE_MS) return null;
+    const lastTs = this.store.lastMessageTs(current.id);
+    const idleMs = lastTs ? now.getTime() - lastTs : 0;
+    if (idleMs > SESSION_IDLE_MS) return 'stale';
+    return null;
+  }
+
+  /**
    * Gọi SAU mỗi lượt, với `tokens.input` mà engine vừa trả về. Nếu chạm ngưỡng thì
    * xoay ngay để lượt SAU bắt đầu ở session mới — không đợi tới lúc vỡ.
    */
   async afterTurn(conversation, tokensInput, now = new Date()) {
     if (!tokensInput || tokensInput < this.compactThreshold) return null;
-    return this._rotate(conversation, Memory.today(now), 'threshold', tokensInput);
+    return this._rotate(conversation, Memory.today(now), 'threshold', tokensInput, now);
   }
 
   /** Mồi cho một session opencode mới: bản compact + N tin cuối nguyên văn. */
@@ -112,17 +138,18 @@ class Memory {
 
   // ── nội bộ ───────────────────────────────────────────────────────────────
 
-  _fresh(day, rotatedFrom, summary, pendingSeed = null) {
+  _fresh(day, rotatedFrom, summary, pendingSeed = null, now = new Date()) {
     return this.store.createConversation({
       id: randomUUID(),
       day,
       rotatedFrom,
       summary,
       pendingSeed,
+      createdAt: now.getTime(),
     });
   }
 
-  async _rotate(current, day, reason, tokensInput = null) {
+  async _rotate(current, day, reason, tokensInput = null, now = new Date()) {
     const all = this.store.recent(current.id, 600);
     const keep = this.settings.keepVerbatim;
     const older = all.slice(0, Math.max(0, all.length - keep));
@@ -133,7 +160,7 @@ class Memory {
 
     const seed = this.buildSeed(summary, verbatim);
     this.store.closeConversation(current.id, summary);
-    const next = this._fresh(day, current.id, summary, seed);
+    const next = this._fresh(day, current.id, summary, seed, now);
     return {
       conversation: next,
       seed,

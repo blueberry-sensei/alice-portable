@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('alice', {
   aliceRemove: (id) => ipcRenderer.invoke('alice:alice:remove', id),
   aliceStop: (id) => ipcRenderer.invoke('alice:alice:stop', id),
   aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
+  aliceSetProvider: (id, provider) => ipcRenderer.invoke('alice:alice:set-provider', id, provider),
+  claudeStatus: (id) => ipcRenderer.invoke('alice:claude:status', id),
+  claudeLogin: (id) => ipcRenderer.invoke('alice:claude:login', id),
+  brainOpen: (id) => ipcRenderer.invoke('alice:brain:open', id),
   pickFolder: () => ipcRenderer.invoke('alice:folder:pick'),
   // Kiểm tra key TRƯỚC khi tạo Alice: đi một chiều như setApiKey, không đọc ngược ra.
   testApiKey: (key) => ipcRenderer.invoke('alice:auth:test', key),
@@ -73,6 +77,12 @@ contextBridge.exposeInMainWorld('alice', {
   onUpdate: (cb) => ipcRenderer.on('alice:update', (_e, status) => cb(status)),
 
   onStream: (cb) => ipcRenderer.on('alice:stream', (_e, payload) => cb(payload)),
+  // Tin từ trang chat công khai (khách quét mã vào chat qua điện thoại) khi Alice
+  // đang mở đúng là Alice đó — để app vẽ ngay, không đợi tự đổi Alice qua lại.
+  onPublicMessage: (cb) => ipcRenderer.on('alice:public-message', (_e, payload) => cb(payload)),
+  // Alice bắt đầu/ngừng trả lời một khách trong phòng chat công khai — để app vẽ
+  // đúng ba chấm nhấp nháy dù người gõ đang ở điện thoại, không phải trong app.
+  onPublicBusy: (cb) => ipcRenderer.on('alice:public-busy', (_e, payload) => cb(payload)),
   onReady: (cb) => ipcRenderer.on('alice:ready', () => cb()),
   onBusy: (cb) => ipcRenderer.on('alice:busy', (_e, msg) => cb(msg)),
   onBrainError: (cb) => ipcRenderer.on('alice:brain-error', (_e, msg) => cb(msg)),

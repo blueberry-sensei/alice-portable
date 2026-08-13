@@ -98,6 +98,55 @@ function buildOpencodeJson(settings, { brainMcp = null } = {}) {
 }
 
 /**
+ * Hook `SessionStart` cho Claude Code — bỏ trống `matcher` để bắt MỌI nguồn
+ * (`startup`, `resume`, `compact`, `clear`). Đã xác minh thật 2026-08-13: hook không
+ * `matcher` của `kd-reserve/automation` tự chạy đúng lúc `SessionStart:startup`.
+ *
+ * Output của hook được Claude Code nạp thẳng vào context — đây là lớp phòng thủ DUY
+ * NHẤT sống ngoài model, nên auto-compact không xoá được, kể cả khi nó xoá sạch phần
+ * còn lại của context.
+ */
+function buildClaudeSettings() {
+  return {
+    hooks: {
+      SessionStart: [
+        {
+          hooks: [
+            { type: 'command', command: 'node .claude-hooks/reload-skill.js' },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Script hook — đọc AGENTS.md CÙNG THƯ MỤC workspace, in ra stdout. Không tự dựng
+ * nội dung: nhờ vậy không có bản luật thứ hai trôi khác AGENTS.md (tham khảo
+ * `kd-reserve/automation/knowledge/tools/reminder.js`, đã chạy thật).
+ */
+function buildReloadSkillHook() {
+  return `#!/usr/bin/env node
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const agentsPath = path.join(__dirname, '..', 'AGENTS.md');
+if (!fs.existsSync(agentsPath)) { process.exit(0); }
+const content = fs.readFileSync(agentsPath, 'utf8').trim();
+if (!content) { process.exit(0); }
+process.stdout.write([
+  '<alice-workspace-reload>',
+  'Luật của workspace này, nạp lại tự động vì phiên vừa khởi động hoặc vừa auto-compact.',
+  'Ký ức trong context sau compaction KHÔNG đáng tin.',
+  '',
+  content,
+  '</alice-workspace-reload>',
+  '',
+].join('\\n'));
+`;
+}
+
+/**
  * Tạo/refresh workspace. Trả về đường dẫn.
  * `dir` mặc định là workspace chung; public server dùng workspace RIÊNG của từng
  * Alice (`alices/<id>/workspace`) để mỗi máy chủ chạy đúng AGENTS.md + MCP của nó.
@@ -112,7 +161,24 @@ function provisionWorkspace(settings, { brainMcp = null, dir = null } = {}) {
     JSON.stringify(buildOpencodeJson(settings, { brainMcp }), null, 2),
     'utf8'
   );
+
+  // Hook cho Claude Code — sinh LUÔN dù Alice đang dùng opencode: vô hại (opencode
+  // không đọc `.claude/`), và Alice đổi provider sau này thì hook đã sẵn sàng.
+  const claudeDir = path.join(target, '.claude');
+  const hooksDir = path.join(target, '.claude-hooks');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.mkdirSync(hooksDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(claudeDir, 'settings.json'),
+    JSON.stringify(buildClaudeSettings(), null, 2),
+    'utf8'
+  );
+  fs.writeFileSync(path.join(hooksDir, 'reload-skill.js'), buildReloadSkillHook(), 'utf8');
+
   return target;
 }
 
-module.exports = { provisionWorkspace, buildAgentsMd, buildOpencodeJson, NO_NEXT_TURN, MEMORY_NOTE };
+module.exports = {
+  provisionWorkspace, buildAgentsMd, buildOpencodeJson, buildClaudeSettings, buildReloadSkillHook,
+  NO_NEXT_TURN, MEMORY_NOTE,
+};

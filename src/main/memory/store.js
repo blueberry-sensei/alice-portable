@@ -116,11 +116,14 @@ class Store {
 
   // ── conversation ─────────────────────────────────────────────────────────
 
-  createConversation({ id, day, engineSession = null, rotatedFrom = null, summary = '', pendingSeed = null }) {
+  createConversation({
+    id, day, engineSession = null, rotatedFrom = null, summary = '', pendingSeed = null,
+    createdAt = null,
+  }) {
     this.db.prepare(
       `INSERT INTO conversations (id, created_at, engine_session, day, summary, rotated_from, pending_seed)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, Date.now(), engineSession, day, summary, rotatedFrom, pendingSeed);
+    ).run(id, createdAt || Date.now(), engineSession, day, summary, rotatedFrom, pendingSeed);
     return this.getConversation(id);
   }
 
@@ -264,6 +267,15 @@ class Store {
       'SELECT * FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?'
     ).all(convId, Math.min(limit, MAX_ROWS));
     return rows.reverse();
+  }
+
+  /** `ts` của tin GẦN NHẤT trong hội thoại — dùng để tính "đã im lặng bao lâu" cho
+   * rotation. `null` nếu hội thoại chưa có tin nào. */
+  lastMessageTs(convId) {
+    const row = this.db.prepare(
+      'SELECT ts FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(convId);
+    return row ? row.ts : null;
   }
 
   /** `tokens_input` đo được ở lượt gần nhất của hội thoại — độ đầy cửa sổ THẬT. */

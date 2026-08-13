@@ -146,6 +146,14 @@ class BrainSidecar {
       SAG_ENVIRONMENT: 'prod',
       SAG_DESKTOP_HOST: this.settings.host || '127.0.0.1',
       SAG_DESKTOP_PORT: String(this.settings.port || 8931),
+      // Dashboard (`runtime/webui`, Next.js) gọi API này từ TRÌNH DUYỆT, không
+      // phải từ tiến trình main — CORS mặc định của sag_api chỉ cho
+      // `localhost:3000` (dev port của apps/web gốc). Thiếu dòng này thì mọi
+      // request từ dashboard bị trình duyệt CHẶN NGAY, hiện "Network error" dù cả
+      // hai tiến trình đều đang chạy khoẻ mạnh (đo thật 2026-08-13). Next.js
+      // redirect `/` → `/login` dùng hostname `localhost`, không phải
+      // `127.0.0.1` dù server bind `127.0.0.1` — khai cả hai cho chắc.
+      SAG_CORS_ORIGINS: 'http://localhost:8933,http://127.0.0.1:8933',
     };
 
     // `D-0054` mục 2: local hay API là lựa chọn của user, nói rõ đánh đổi trên wizard.

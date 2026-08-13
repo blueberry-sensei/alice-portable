@@ -186,3 +186,78 @@ test('lastTokens trả số ĐO ĐƯỢC của lượt gần nhất, không ph�
   assert.equal(store.lastTokens(conv.id), 12345);
   store.close();
 });
+
+test('lastMessageTs: trả ts của tin GẦN NHẤT trong hội thoại, null nếu chưa có tin nào', () => {
+  const store = new Store(tmpDb());
+  const conv = store.createConversation({ id: 'c1', day: '2026-08-13' });
+  assert.equal(store.lastMessageTs(conv.id), null);
+  store.add({ convId: conv.id, role: 'human', text: 'một', ts: 1000 });
+  store.add({ convId: conv.id, role: 'alice', text: 'hai', ts: 2000 });
+  assert.equal(store.lastMessageTs(conv.id), 2000);
+  store.close();
+});
+
+// ── rotation theo tuổi + im lặng (2026-08-13) ────────────────────────────────
+//
+// Bệ hạ chốt: xoay session khi tuổi > 12h VÀ im lặng kể từ tin cuối > 1h — AND,
+// không phải OR: một session 13 tiếng tuổi mà vẫn đang nhắn liên tục KHÔNG xoay.
+// Cộng thêm vào rotation cũ (hết ngày / tràn context), không thay thế.
+
+const ONE_HOUR = 3600 * 1000;
+const TWELVE_HOURS = 12 * ONE_HOUR;
+
+function memoryWith(store, overrides = {}) {
+  const settings = {
+    contextCeiling: 100000, windowRatio: 0.6, compactRatio: 0.8,
+    keepVerbatim: 10, rotateDaily: false, ...overrides,
+  };
+  return new Memory(store, settings, async () => 'tóm tắt giả');
+}
+
+test('rotation: tuổi > 12h NHƯNG vẫn đang nhắn liên tục (idle < 1h) → KHÔNG xoay', async () => {
+  const store = new Store(tmpDb());
+  const memory = memoryWith(store);
+  const base = new Date('2026-08-13T00:00:00Z');
+  await memory.ensureConversation(base);
+  const conv = store.currentConversation();
+  store.add({ convId: conv.id, role: 'human', text: 'chào', ts: base.getTime() });
+
+  const later = new Date(base.getTime() + TWELVE_HOURS + ONE_HOUR);
+  store.add({
+    convId: conv.id, role: 'human', text: 'vẫn đang nói',
+    ts: later.getTime() - 5 * 60 * 1000,
+  });
+
+  const { conversation } = await memory.ensureConversation(later);
+  assert.equal(conversation.id, conv.id, 'tuổi một mình không đủ — phải còn idle>1h nữa mới xoay');
+  store.close();
+});
+
+test('rotation: tuổi > 12h VÀ im lặng > 1h → xoay', async () => {
+  const store = new Store(tmpDb());
+  const memory = memoryWith(store);
+  const base = new Date('2026-08-13T00:00:00Z');
+  await memory.ensureConversation(base);
+  const conv = store.currentConversation();
+  store.add({ convId: conv.id, role: 'human', text: 'chào', ts: base.getTime() });
+
+  const later = new Date(base.getTime() + TWELVE_HOURS + 2 * ONE_HOUR);
+  const { conversation, seed } = await memory.ensureConversation(later);
+  assert.notEqual(conversation.id, conv.id, 'phải xoay sang hội thoại mới');
+  assert.ok(seed, 'hội thoại mới phải có mồi tiếp nối');
+  store.close();
+});
+
+test('rotation: im lặng > 1h NHƯNG session chưa tới 12h tuổi → KHÔNG xoay', async () => {
+  const store = new Store(tmpDb());
+  const memory = memoryWith(store);
+  const base = new Date('2026-08-13T00:00:00Z');
+  await memory.ensureConversation(base);
+  const conv = store.currentConversation();
+  store.add({ convId: conv.id, role: 'human', text: 'chào', ts: base.getTime() });
+
+  const later = new Date(base.getTime() + 2 * ONE_HOUR);
+  const { conversation } = await memory.ensureConversation(later);
+  assert.equal(conversation.id, conv.id);
+  store.close();
+});

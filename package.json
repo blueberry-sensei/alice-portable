@@ -1,6 +1,6 @@
 {
   "name": "alice-portable",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Alice — bản portable. Engine OpenCode, UI DREAM, Brain đi kèm.",
   "main": "src/main/main.js",
   "author": "dat-phan",

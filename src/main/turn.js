@@ -46,6 +46,9 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
    * @param {object}   [opts]
    * @param {string?}  [opts.who]  tên người gửi khi Alice đang phục vụ nhiều người
    *   qua máy chủ public (`anonymous-x7k2q`, `nga`…). `null` = chủ máy chat trong app.
+   * @param {function} [opts.onSaved]  (messageId, conversationId) — gọi NGAY sau khi
+   *   tin của người dùng được lưu, TRƯỚC khi engine chạy. Máy chủ public dùng chỗ này
+   *   để phát tin lên phòng chat ngay, không đợi Alice trả lời xong.
    */
   return async function runTurn(userText, onStream = null, opts = {}) {
     const who = opts.who || null;
@@ -64,6 +67,9 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
       // được gộp vào lượt kế tiếp có gọi Alice.
       delivered: !silent,
     });
+    // Người gọi (public-server) cần biết NGAY khi tin đã lưu — trước khi engine
+    // chạy — để phát tin lên phòng chat TRƯỚC báo "đang trả lời", không phải sau.
+    if (opts.onSaved) opts.onSaved(messageId, conversation.id);
 
     // Im lặng ≠ mù: Alice không trả lời câu này, nhưng câu này vẫn nằm trong kho và
     // sẽ đi vào ngữ cảnh của lượt sau. Trả về sớm, KHÔNG gọi engine — đó là toàn bộ

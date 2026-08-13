@@ -67,7 +67,8 @@ function save(state, paths = {}) {
  * (chọn lúc tạo, đổi được sau) — không lẫn với Alice khác.
  * Trả { state, alice }.
  */
-function create({ name, key, model = null, dir = null }, paths = {}) {
+function create({ name, key, model = null, dir = null, provider = 'opencode' }, paths = {}) {
+  const providerT = provider === 'claude' ? 'claude' : 'opencode';
   const p = resolve(paths);
   const state = load(paths);
   const id = crypto.randomUUID();
@@ -80,10 +81,29 @@ function create({ name, key, model = null, dir = null }, paths = {}) {
     ? path.resolve(custom, slug(name) || id.slice(0, 8))
     : aliceDirOf(p, id);
 
+  // Chặn hai Alice cùng sống một thư mục — chung thư mục là chung `chat.db`, và
+  // đó đúng là nguyên nhân "chat trong app một nơi, trang public một nơi khác,
+  // tưởng là cùng một Alice mà không đồng bộ" (2026-08-13). Hai lớp:
+  //   (a) trùng với một Alice KHÁC ngay trong danh sách này;
+  //   (b) thư mục đã có dấu vết `chat.db` — rất có thể một BẢN CÀI KHÁC đã tạo
+  //       Alice ở đúng chỗ này rồi; registry của bản đó app này không đọc được,
+  //       chỉ thấy được qua dấu vết để lại trên đĩa.
+  const homeKey = path.resolve(home).toLowerCase();
+  const clash = state.alices.find((a) => path.resolve(dirOf(a, paths)).toLowerCase() === homeKey);
+  if (clash) {
+    throw new Error(`Thư mục này đã thuộc về Alice "${clash.name}" trong danh sách rồi — mỗi Alice cần một thư mục riêng.`);
+  }
+  if (fs.existsSync(path.join(home, 'chat.db'))) {
+    throw new Error(
+      'Thư mục này đã có dữ liệu Alice rồi (chat.db có sẵn) — rất có thể một bản cài khác đã dùng đúng chỗ này. '
+      + 'Chọn thư mục khác, đừng tạo Alice mới đè lên dữ liệu cũ.'
+    );
+  }
+
   const alice = {
     id,
     name: String(name || '').trim() || 'Alice',
-    provider: 'opencode',
+    provider: providerT,
     model: model || null,
     created_at: Date.now(),
   };
@@ -94,10 +114,20 @@ function create({ name, key, model = null, dir = null }, paths = {}) {
 
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(path.join(home, 'brain'), { recursive: true });
-  if (key && String(key).trim()) {
+  // Claude dùng subscription (đăng nhập qua `claude login`, cô lập bằng
+  // CLAUDE_CONFIG_DIR) — KHÔNG có API key để lưu.
+  if (providerT === 'opencode' && key && String(key).trim()) {
     auth.setApiKey('opencode', String(key).trim(), home);
   }
   return { state, alice };
+}
+
+/** Thư mục CLAUDE_CONFIG_DIR riêng của một Alice dùng provider `claude` — cô lập
+ * subscription, không ảnh hưởng đăng nhập `claude` global của máy hay Alice khác.
+ * Đã xác minh thật (2026-08-13): set biến này trỏ thư mục trống thì `claude auth
+ * status` báo `loggedIn: false`, tách hẳn khỏi phiên đăng nhập global. */
+function claudeConfigDir(aliceHomeDir) {
+  return path.join(aliceHomeDir, 'claude-config');
 }
 
 /** Tên thư mục an toàn từ tên Alice: bỏ dấu, bỏ ký tự Windows không nhận. */
@@ -117,6 +147,7 @@ function update(id, patch, paths = {}) {
   if (!alice) return { state, updated: false };
   if (patch.name !== undefined) alice.name = String(patch.name).trim() || alice.name;
   if (patch.model !== undefined) alice.model = patch.model || null;
+  if (patch.provider !== undefined) alice.provider = patch.provider === 'claude' ? 'claude' : 'opencode';
   save(state, paths);
   return { state, updated: true };
 }
@@ -126,7 +157,7 @@ function update(id, patch, paths = {}) {
  * gọi nơi khác phải hỏi lại người dùng trước). Chỉ xoá thư mục nằm trong
  * `alices/` — guard đường dẫn, không bao giờ xoá lung tung.
  */
-function remove(id, paths = {}) {
+async function remove(id, paths = {}) {
   const p = resolve(paths);
   const state = load(paths);
   const idx = state.alices.findIndex((a) => a.id === id);
@@ -144,8 +175,13 @@ function remove(id, paths = {}) {
   let keptDir = null;
   if (!alice.dir && path.dirname(auto) === path.resolve(p.alicesDir) && fs.existsSync(auto)) {
     // `maxRetries`: trên Windows, chat.db/lancedb vừa đóng vẫn còn handle treo vài
-    // trăm ms — xoá phát đầu ăn EBUSY và trước đây nó ném thẳng ra làm đơ UI.
-    fs.rmSync(auto, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+    // trăm ms — xoá phát đầu ăn EBUSY.
+    //
+    // PHẢI dùng `fs.promises.rm` (bất đồng bộ), KHÔNG `fs.rmSync`: bản sync retry
+    // bằng `Atomics.wait` — CHẶN CỨNG main process, kể cả window message, kể cả
+    // IPC khác — trong tới 8×150ms. Đó chính là triệu chứng "xoá Alice là cả app
+    // đơ một lúc" (2026-08-13). Bản async retry bằng `setTimeout`, không chặn gì.
+    await fs.promises.rm(auto, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
   } else if (alice.dir) {
     keptDir = home;
   }
@@ -157,7 +193,7 @@ function remove(id, paths = {}) {
  * alice-data/): gom hết vào Alice đầu tiên — chat db, brain, auth opencode.
  * Trả state mới, hoặc null nếu không có gì để migrate (máy mới tinh).
  */
-function migrateLegacy({ name }, paths = {}) {
+async function migrateLegacy({ name }, paths = {}) {
   const p = resolve(paths);
   const state = load(paths);
   if (state.alices.length) return null;
@@ -175,17 +211,20 @@ function migrateLegacy({ name }, paths = {}) {
     if (fs.existsSync(f)) fs.copyFileSync(f, path.join(dir, 'chat.db' + suffix));
   }
 
-  // Brain (sag.db + lance) — nếu có.
+  // Brain (sag.db + lance) — nếu có. Có thể tới hàng trăm MB, hàng chục nghìn
+  // file nhỏ (lancedb) — PHẢI `fs.promises.cp` (bất đồng bộ), KHÔNG `fs.cpSync`:
+  // bản sync chặn cứng main process suốt cả quá trình copy — đo thật mất tới
+  // ~4-5 phút app đơ hoàn toàn, kể cả cửa sổ không hiện ra được (2026-08-13).
   const legacyBrain = path.join(p.dataDir, 'brain');
   if (fs.existsSync(path.join(legacyBrain, 'sag.db'))) {
     fs.mkdirSync(path.join(dir, 'brain'), { recursive: true });
-    fs.cpSync(legacyBrain, path.join(dir, 'brain'), { recursive: true });
+    await fs.promises.cp(legacyBrain, path.join(dir, 'brain'), { recursive: true });
   }
 
   // Auth + session opencode.
   const legacyOc = path.join(p.dataDir, 'opencode');
   if (fs.existsSync(legacyOc)) {
-    fs.cpSync(legacyOc, path.join(dir, 'opencode'), { recursive: true });
+    await fs.promises.cp(legacyOc, path.join(dir, 'opencode'), { recursive: true });
   }
 
   // Avatar cũ (ảnh chung của bản một-Alice).
@@ -207,4 +246,7 @@ function migrateLegacy({ name }, paths = {}) {
   return state;
 }
 
-module.exports = { load, save, create, update, remove, migrateLegacy, resolve, aliceDirOf, dirOf, slug };
+module.exports = {
+  load, save, create, update, remove, migrateLegacy, resolve, aliceDirOf, dirOf, slug,
+  claudeConfigDir,
+};

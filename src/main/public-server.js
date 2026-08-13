@@ -25,7 +25,7 @@ const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { createTurnRunner } = require('./turn');
 const { provisionWorkspace } = require('./alice');
-const { isMention } = require('./mention');
+const { isMention, handlesFor } = require('./mention');
 const { toolActivity } = require('./activity');
 
 const DEFAULT_PORT = 8931;
@@ -102,6 +102,17 @@ class PublicServer {
     this.brainMcp = opts.brainMcp;
     this.log = opts.log;
     this.avatar = opts.avatar || (() => null);
+    // Báo cho tiến trình chính khi có tin MỚI từ phòng chat công khai này — để cửa
+    // sổ app (nếu đang mở đúng Alice này) vẽ tin đó ra ngay, không phải tự bấm
+    // "chọn lại Alice" mới thấy khách vừa nói gì.
+    this.onMessage = typeof opts.onMessage === 'function' ? opts.onMessage : null;
+    // Báo cho tiến trình chính khi Alice BẮT ĐẦU/NGỪNG trả lời một lượt trong phòng
+    // công khai — `onMessage` chỉ báo khi có TIN, không báo trạng thái "đang gõ".
+    // Thiếu callback này thì cửa sổ app không bao giờ biết để vẽ ba chấm nhấp
+    // nháy, dù trang web (SSE) vẫn nhận đúng `busy`/`activity` — đúng triệu chứng
+    // "không thấy typing" chỉ xảy ra bên app, còn trang public thì tự nó vẫn có dữ
+    // liệu để vẽ (đo thật 2026-08-13).
+    this.onBusy = typeof opts.onBusy === 'function' ? opts.onBusy : null;
     this.store = null;
     this.runTurn = null;
     this.server = null;
@@ -122,6 +133,18 @@ class PublicServer {
 
   get running() {
     return Boolean(this.server && this.server.listening);
+  }
+
+  /**
+   * Bao nhiêu người đang chat với Alice này.
+   *
+   * `online`  — trình duyệt đang mở kết nối SSE ngay lúc này (`this.clients`).
+   * `joined`  — tổng số phiên đã cấp kể từ lúc máy chủ này bật (`this.sessions`);
+   *             mất khi `stop()` — đúng nghĩa "trong lần public này có bấy
+   *             nhiêu người", không phải một con số tích luỹ vĩnh viễn.
+   */
+  stats() {
+    return { online: this.clients.size, joined: this.sessions.size };
   }
 
   /** Cấu hình public của Alice: { enabled, mode, port, code, accounts }. */
@@ -347,9 +370,15 @@ class PublicServer {
       return;
     }
 
-    // Thông tin công khai — tên và ảnh để trang chat hiện đúng Alice.
+    // Thông tin công khai — tên, ảnh, và các tên gọi được để trang chat gợi ý khi
+    // khách gõ `@` (không phải ai cũng nhớ Alice này có thể có tên riêng ngoài
+    // `alice`, ví dụ "Alice K-OS" → `@alice`, `@kos`, `@alice-k-os`).
     if (req.method === 'GET' && url.pathname === '/v1/who') {
-      this._json(res, 200, { name: this.alice.name, avatar: this.avatar() });
+      this._json(res, 200, {
+        name: this.alice.name,
+        avatar: this.avatar(),
+        handles: [...handlesFor(this.alice.name)],
+      });
       return;
     }
 
@@ -564,6 +593,23 @@ class PublicServer {
     this._broadcastRaw(`data: ${JSON.stringify(event)}\n\n`);
   }
 
+  /**
+   * Phát tin vừa được tạo BÊN NGOÀI phòng chat công khai — cụ thể là Bệ hạ chat
+   * ngay trong app trong lúc Alice đang public. `chat.db` là CHUNG một file giữa
+   * app và máy chủ public (cùng `baseDir`), nhưng hai bên là hai `Store` khác
+   * nhau nên máy chủ public không tự biết app vừa ghi thêm gì — phải được gọi.
+   *
+   * Không có hàm này thì trang web/điện thoại chỉ thấy tin app gửi sau khi tự
+   * tải lại trang (mất "realtime"), đúng triệu chứng "chat trên app, điện thoại
+   * không thấy".
+   */
+  broadcastFromDesktop(conversationId, sinceId) {
+    if (!this.store) return;
+    for (const row of this.store.since(conversationId, sinceId)) {
+      this._broadcast({ type: 'message', message: this._wire(row) });
+    }
+  }
+
   /** Một tin trong kho → hình dạng mà trang web hiểu. */
   _wire(row) {
     let who = null;
@@ -595,6 +641,7 @@ class PublicServer {
       const out = await this.runTurn(message, null, { who, silent: true });
       const row = { id: out.messageId, role: 'human', text: message, ts: Date.now(), who };
       this._broadcast({ type: 'message', message: row });
+      if (this.onMessage) this.onMessage(row);
       this._json(res, 200, { ok: true, id: out.messageId, replied: false });
       return;
     }
@@ -610,7 +657,6 @@ class PublicServer {
     try {
       while (this.busy) await new Promise((r) => setTimeout(r, 200));
       this.busy = true;
-      this._broadcast({ type: 'busy', busy: true });
       try {
         this.engine.setBaseDir(this.baseDir);
         const seenIds = new Set();
@@ -623,14 +669,31 @@ class PublicServer {
             seenIds.add(act.key);
             this.activity = act.label;
             this._broadcast({ type: 'activity', label: act.label });
+            if (this.onBusy) this.onBusy(true, act.label);
           }
-        }, { who });
+        }, {
+          who,
+          // Tin của người gửi phải lên MỌI máy NGAY khi lưu xong — trước cả báo
+          // "đang trả lời". Trước đây `busy:true` phát TRƯỚC (ngay khi vào try), còn
+          // tin người gửi chỉ phát SAU KHI Alice trả lời xong — nên "Alice đang trả
+          // lời…" luôn vẽ ra TRƯỚC tin vừa gõ, sai thứ tự (đo thật 2026-08-13, xem
+          // `broadcastFromDesktop` cho nhánh app→web tương ứng).
+          onSaved: (messageId) => {
+            const row = { id: messageId, role: 'human', text: message, ts: Date.now(), who };
+            this._broadcast({ type: 'message', message: row });
+            if (this.onMessage) this.onMessage(row);
+            this._broadcast({ type: 'busy', busy: true });
+            if (this.onBusy) this.onBusy(true, null);
+          },
+        });
 
         this.activity = null;
         this.log.info(`public chat ok: who=${who} model=${out.model || '-'} caughtUp=${out.caughtUp || 0}`);
-        // Phát cả tin của người gửi lẫn câu trả lời, theo đúng id trong kho.
-        for (const row of this.store.since(out.conversationId, out.messageId - 1)) {
-          this._broadcast({ type: 'message', message: this._wire(row) });
+        // Tin người gửi đã phát ở `onSaved` rồi — giờ chỉ còn câu trả lời của Alice.
+        for (const row of this.store.since(out.conversationId, out.messageId)) {
+          const wired = this._wire(row);
+          this._broadcast({ type: 'message', message: wired });
+          if (this.onMessage) this.onMessage(wired);
         }
       } catch (err) {
         this.activity = null;
@@ -640,6 +703,7 @@ class PublicServer {
       } finally {
         this.busy = false;
         this._broadcast({ type: 'busy', busy: false });
+        if (this.onBusy) this.onBusy(false, null);
       }
     } finally {
       this.queue -= 1;
