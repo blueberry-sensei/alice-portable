@@ -103,6 +103,15 @@ jobs:
         shell: pwsh
         run: ./scripts/bundle-brain.ps1 -Source vendor
 
+      # Dashboard Alice Brain (`apps/web` gốc, Next.js standalone) — vendor lúc
+      # build, KHÔNG vendor source vào repo (khác brain-source: alice-brain giờ
+      # đã public nên clone thẳng được, không cần vendor riêng). Thiếu bước này
+      # là nút "Xem Alice Brain…" báo "thiếu runtime/webui" trên MỌI hệ điều
+      # hành (đúng lỗi đã dính thật ở bản v0.5.0 do CI chưa có bước này).
+      - name: Nhúng dashboard (apps/web)
+        shell: pwsh
+        run: ./scripts/bundle-webui.ps1
+
       - name: Kiểm bộ cài không lẫn tri thức của ai
         shell: bash
         run: |
@@ -112,6 +121,7 @@ jobs:
           # Brain thật sự nằm trong bộ cài — kiểm import trong runtime vừa dựng.
           test -d runtime/brain/app/sag_api || { echo "LỖI: thiếu runtime/brain/app/sag_api"; exit 1; }
           test -d runtime/brain/app/alicecore || { echo "LỖI: thiếu runtime/brain/app/alicecore"; exit 1; }
+          test -f runtime/webui/server.js || { echo "LỖI: thiếu runtime/webui/server.js"; exit 1; }
           echo "sạch và đủ"
 
       - name: Test
