@@ -20,6 +20,23 @@ const { PublicServer } = require('./public-server');
 const { Tunnel } = require('./tunnel');
 const registryModule = require('./registry');
 
+/**
+ * Thư mục Chromium của app nằm CẠNH bản cài, không nằm ở %APPDATA% chung.
+ *
+ * Phải đặt TRƯỚC `app.whenReady()` thì Electron mới nhận.
+ *
+ * Hai lý do, và cái thứ hai là một bug thật:
+ *   1. "Portable" nghĩa là mọi thứ đi theo thư mục — cache và cookie cũng vậy.
+ *   2. `requestSingleInstanceLock()` khoá theo ĐƯỜNG DẪN userData. Để mặc định thì
+ *      mọi bản cài Alice trên cùng một máy dùng chung `%APPDATA%/alice-portable`,
+ *      nên chỉ MỘT bản chạy được: mở bản thứ hai là nó lặng lẽ thoát, không cửa sổ,
+ *      không báo gì. Đúng ý đồ đã ghi ở cuối file ("nhiều app Alice ở các thư mục
+ *      khác nhau") nhưng chưa từng được thực hiện — bản cài đang chạy chặn bản dev,
+ *      và hai bản cài ở hai thư mục cũng chặn nhau.
+ */
+fs.mkdirSync(path.join(config.DATA_DIR, 'chromium'), { recursive: true });
+app.setPath('userData', path.join(config.DATA_DIR, 'chromium'));
+
 let win = null;
 let store = null;      // chat db của Alice ĐANG MỞ
 let memory = null;
@@ -55,6 +72,21 @@ const updater = new Updater();
  * nạp xong thay vì chỉ ngồi chờ được đẩy.
  */
 let bootPromise = null;
+// Boot hỏng thì GIỮ LẠI lý do, không ném tiếp.
+//
+// Bản trước `bootPromise` re-throw, mà mọi handler IPC đều mở đầu bằng
+// `await bootPromise` — nên một lần boot hỏng là đầu độc VĨNH VIỄN mọi lệnh sau đó:
+// `ipcRenderer.invoke` reject, renderer không bắt, nút bấm kẹt ở "Đang tạo…" và ô
+// chọn model đứng mãi ở "(đang tải…)". App còn vẽ được nhưng không làm được gì.
+let bootError = null;
+
+/** Mọi handler gọi cái này thay cho `await bootPromise`. */
+async function ready() {
+  try {
+    await bootPromise;
+  } catch { /* lý do đã nằm trong bootError */ }
+  return bootError;
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -66,6 +98,9 @@ function createWindow() {
     backgroundColor: '#080E1C', // nền DREAM, để lúc mở không loé trắng
     show: false,
     autoHideMenuBar: true,
+    // Bản đóng gói lấy icon từ file exe; lúc `npm start` thì không, nên trỏ tay vào
+    // đúng ảnh để cửa sổ dev cũng mang mặt Alice chứ không phải nguyên tử Electron.
+    icon: path.join(__dirname, '..', 'renderer', 'assets', 'img', 'alice-default.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -193,13 +228,15 @@ async function activateAlice(id) {
   if (brain.available) {
     try {
       // Lần đầu: dựng brain RỖNG (schema tự tạo). Alice bắt đầu không tri thức.
-      brain.ensureSchema();
+      // BẢN ASYNC — bản `spawnSync` đóng băng cả app trong lúc python nạp thư viện.
+      await brain.ensureSchemaAsync();
     } catch (err) {
       log.error(`brain.ensureSchema: ${err.message}`);
       if (win) win.webContents.send('alice:brain-error', `Không dựng được trí nhớ: ${err.message}`);
     }
   }
 
+  const brainMcp = brain && brain.available ? brain.mcpConfig() : null;
   // Chỗ làm việc RIÊNG của Alice này, nằm trong thư mục của chính nó. Trước đây
   // mọi Alice dùng chung `alice-data/workspace`, nên file Alice này tạo ra lại nằm
   // trong tầm với của Alice khác — và người dùng chọn thư mục riêng cho Alice thì
@@ -249,7 +286,21 @@ async function boot() {
 // ── IPC ────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('alice:status', async () => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) {
+    // Trả một status TỐI THIỂU nhưng ĐÚNG HÌNH DẠNG: renderer đọc thẳng
+    // `st.alices.length`, `st.engine.available`… — thiếu trường là nó ném ngay ở
+    // dòng đầu và người dùng nhận màn hình trắng thay vì lý do thật.
+    return {
+      root: config.ROOT, dataDir: config.DATA_DIR, appName: config.appName(),
+      alices: [], active: null, activeName: null,
+      engine: { path: null, source: 'missing', available: false },
+      auth: { configured: false, providers: [] },
+      brain: { enabled: false }, settings: settings || {},
+      conversation: null, messageCount: 0, update: updater.status(), model: null,
+      bootError: boom,
+    };
+  }
   const base = registry.active ? aliceDirFor(registry.active) : null;
   return {
     root: config.ROOT,
@@ -273,7 +324,8 @@ ipcMain.handle('alice:status', async () => {
 // ── các Alice ──────────────────────────────────────────────────────────────
 
 ipcMain.handle('alice:alice:list', async () => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   // Dashboard cần đủ: tên, đường dẫn folder, avatar, có key chưa, public chưa.
   const alices = registry.alices.map((a) => {
     const base = aliceDirFor(a.id);
@@ -289,6 +341,59 @@ ipcMain.handle('alice:alice:list', async () => {
   return { alices, active: registry.active };
 });
 
+/**
+ * Kiểm tra một chìa khoá NGƯỜI DÙNG VỪA DÁN, trước khi tạo Alice nào.
+ *
+ * Vì sao không chỉ gọi `opencode models`: lệnh đó chạy được cả khi KHÔNG có key —
+ * đã đo, nó trả về đủ 7 model với thư mục auth trống. Nên nó chứng minh được "máy
+ * chủ Zen còn sống", chứ không chứng minh được "chìa khoá này dùng được". Muốn biết
+ * chắc thì phải GỌI THẬT một lượt: một chữ, model free, timeout ngắn.
+ *
+ * Chạy trong thư mục tạm, xoá ngay sau khi xong — không đụng vào Alice nào.
+ */
+ipcMain.handle('alice:auth:test', async (_e, key) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  const k = String(key || '').trim();
+  if (!k) return { error: 'Dán chìa khoá vào ô trên đã.' };
+  if (!engine.available) return { error: 'Bản cài này thiếu phần chạy bên trong (opencode).' };
+
+  const probe = path.join(config.DATA_DIR, '.keytest');
+  try {
+    fs.rmSync(probe, { recursive: true, force: true });
+    auth.setApiKey('opencode', k, probe);
+
+    const models = await engine.listModels({ baseDir: probe, timeout: 45000 });
+    if (!models.length) {
+      return { error: 'Không đọc được danh sách model — kiểm tra kết nối mạng rồi thử lại.' };
+    }
+
+    // Model rẻ nhất để thử: ưu tiên bản free trong danh sách thật.
+    const free = models.find((m) => /-free$/.test(m)) || models[0];
+    try {
+      await engine.run({
+        message: 'ping', sessionId: null, model: free, cwd: probe,
+        baseDir: probe, idleMs: 45000,
+      });
+    } catch (err) {
+      if (err.cancelled) return { error: 'Đã huỷ.' };
+      const why = String(err.message || err);
+      // Lỗi xác thực nói rõ là chìa khoá sai; lỗi khác thì nói nguyên văn, đừng
+      // đổ oan cho cái key khi thật ra là mạng hỏng hay model chết.
+      if (/401|403|unauthor|invalid.*key|api key|forbidden/i.test(why)) {
+        return { error: 'Chìa khoá không dùng được — kiểm tra lại rồi dán lần nữa.' };
+      }
+      return { error: `Thử chìa khoá không xong: ${why.slice(0, 300)}` };
+    }
+    log.info(`auth test ok: ${models.length} model, ping bằng ${free}`);
+    return { ok: true, models, tested: free };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 ipcMain.handle('alice:folder:pick', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Chọn thư mục cho Alice',
@@ -299,7 +404,8 @@ ipcMain.handle('alice:folder:pick', async () => {
 });
 
 ipcMain.handle('alice:alice:create', async (_e, { name, key, model, dir }) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   const nameT = String(name || '').trim();
   const keyT = String(key || '').trim();
   if (!nameT) return { error: 'Nhập tên cho Alice.' };
@@ -320,7 +426,8 @@ ipcMain.handle('alice:alice:create', async (_e, { name, key, model, dir }) => {
 });
 
 ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   const { state, updated } = registryModule.update(id, { model });
   if (!updated) return { error: 'Không tìm thấy Alice.' };
   registry = state;
@@ -331,7 +438,8 @@ ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
 });
 
 ipcMain.handle('alice:alice:select', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     await activateAlice(id);
   } catch (err) {
@@ -341,7 +449,8 @@ ipcMain.handle('alice:alice:select', async (_e, id) => {
 });
 
 ipcMain.handle('alice:alice:remove', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   // Tắt máy chủ của Alice bị xoá trước khi xoá dữ liệu.
   const pub = publicServers.get(id);
   if (pub) {
@@ -438,7 +547,8 @@ function tunnelFor(id) {
 }
 
 ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const pub = publicServerFor(id);
     if (enabled) {
@@ -467,7 +577,8 @@ ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
 });
 
 ipcMain.handle('alice:public:set-mode', async (_e, id, mode) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const pub = publicServerFor(id);
     const next = ['anyone', 'code', 'account'].includes(mode) ? mode : 'anyone';
@@ -490,7 +601,8 @@ ipcMain.handle('alice:public:set-mode', async (_e, id, mode) => {
 });
 
 ipcMain.handle('alice:public:code:rotate', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const code = publicServerFor(id).rotateCode();
     log.info(`public access code rotated: ${id}`);
@@ -501,7 +613,8 @@ ipcMain.handle('alice:public:code:rotate', async (_e, id) => {
 });
 
 ipcMain.handle('alice:public:account:add', async (_e, id, { username, password }) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const pub = publicServerFor(id);
     const cfg = pub.config();
@@ -520,7 +633,8 @@ ipcMain.handle('alice:public:account:add', async (_e, id, { username, password }
 });
 
 ipcMain.handle('alice:public:account:remove', async (_e, id, username) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const pub = publicServerFor(id);
     const cfg = pub.config();
@@ -533,7 +647,8 @@ ipcMain.handle('alice:public:account:remove', async (_e, id, username) => {
 });
 
 ipcMain.handle('alice:public:info', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const pub = publicServerFor(id);
     const cfg = pub.config();
@@ -562,7 +677,8 @@ ipcMain.handle('alice:public:info', async (_e, id) => {
 // ── chia sẻ ra Internet (cloudflared) ──────────────────────────────────────
 
 ipcMain.handle('alice:tunnel:status', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     return tunnelFor(id).status();
   } catch (err) {
@@ -571,7 +687,8 @@ ipcMain.handle('alice:tunnel:status', async (_e, id) => {
 });
 
 ipcMain.handle('alice:tunnel:download', async (event, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const t = tunnelFor(id);
     const p = await t.download((pct) => {
@@ -585,7 +702,8 @@ ipcMain.handle('alice:tunnel:download', async (event, id) => {
 });
 
 ipcMain.handle('alice:tunnel:toggle', async (_e, id, enabled) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   try {
     const t = tunnelFor(id);
     if (!enabled) {
@@ -698,7 +816,7 @@ ipcMain.handle('alice:debug:log', async () => ({
 ipcMain.handle('alice:debug:open', async () => shell.openPath(log.LOG_DIR));
 
 ipcMain.handle('alice:debug:transcript', async (_e, limit = 30) => {
-  await bootPromise;
+  if (await ready()) return [];
   const conv = store ? store.currentConversation() : null;
   if (!conv) return [];
   return store.recent(conv.id, limit).map((m) => ({
@@ -712,7 +830,7 @@ ipcMain.handle('alice:debug:transcript', async (_e, limit = 30) => {
 });
 
 ipcMain.handle('alice:history', async (_e, limit = 80) => {
-  await bootPromise;
+  if (await ready()) return [];
   const conv = store ? store.currentConversation() : null;
   if (!conv) return [];
   return store.recent(conv.id, limit).map((m) => ({
@@ -721,13 +839,14 @@ ipcMain.handle('alice:history', async (_e, limit = 80) => {
 });
 
 ipcMain.handle('alice:search', async (_e, query) => {
-  await bootPromise;
+  if (await ready()) return [];
   if (!store) return [];
   return store.search(query, 20).map((m) => ({ id: m.id, role: m.role, text: m.text, ts: m.ts }));
 });
 
 ipcMain.handle('alice:models', async () => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { models: [], error: `App chưa khởi động được: ${boom}` };
   try {
     return { models: await engine.listModels(), error: null };
   } catch (err) {
@@ -748,7 +867,8 @@ ipcMain.handle('alice:update:open', async (_e, url) => {
 // ── cuộc trò chuyện ────────────────────────────────────────────────────────
 
 ipcMain.handle('alice:chat:clear', async () => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   const conv = store ? store.currentConversation() : null;
   if (conv) {
     log.info(`clear chat: conversation ${conv.id} — ${store.count(conv.id)} messages`);
@@ -760,12 +880,13 @@ ipcMain.handle('alice:chat:clear', async () => {
 // ── lịch hẹn (của Alice đang mở) ───────────────────────────────────────────
 
 ipcMain.handle('alice:sched:list', async () => {
-  await bootPromise;
+  if (await ready()) return [];
   return store ? store.listSchedules() : [];
 });
 
 ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!store) return { error: 'Chưa có Alice nào.' };
   const h = Number(hour);
   const m = Number(minute);
@@ -780,7 +901,8 @@ ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
 });
 
 ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!store) return { error: 'Chưa có Alice nào.' };
   if (patch.task !== undefined) patch.task = String(patch.task || '').trim();
   if (patch.task === '') return { error: 'Việc cần làm không được để trống.' };
@@ -790,7 +912,8 @@ ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
 });
 
 ipcMain.handle('alice:sched:remove', async (_e, id) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!store) return { error: 'Chưa có Alice nào.' };
   store.removeSchedule(Number(id));
   return { ok: true };
@@ -828,7 +951,8 @@ ipcMain.handle('alice:settings:set', async (_e, patch) => {
 });
 
 ipcMain.handle('alice:send', async (event, text) => {
-  await bootPromise;
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!runTurn) return { error: 'Chưa có Alice nào. Tạo Alice trước đã.' };
   if (busy) return { error: 'Đang bận một lượt khác — chờ em trả lời xong đã ạ.' };
   if (!engine.available) {
@@ -872,6 +996,12 @@ ipcMain.handle('alice:cancel', async () => engine.cancel());
 // Một máy có thể chạy nhiều app Alice ở các thư mục khác nhau — nhưng cùng một
 // thư mục thì chỉ một tiến trình. Mở exe lần nữa khi app đang ẩn = hiện cửa sổ lên.
 if (!app.requestSingleInstanceLock()) {
+  // Bình thường: bản đang chạy sẽ hiện cửa sổ lên (xem `second-instance` bên dưới)
+  // và bản này thoát. Nhưng nếu lần trước app bị GIẾT CỨNG, khoá có thể còn treo mà
+  // không tiến trình nào giữ — khi đó bấm mở Alice không ra gì, không cửa sổ, không
+  // báo lỗi, không một dòng log. Đã tốn một lượt chẩn đoán vì đúng chỗ này im lặng.
+  log.info(`không lấy được khoá single-instance (userData=${app.getPath('userData')}) — thoát. `
+    + 'Nếu không có Alice nào đang chạy, xoá file "lockfile" trong thư mục đó rồi mở lại.');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -885,9 +1015,11 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     createWindow();
     bootPromise = boot().catch((err) => {
+      bootError = String(err.message || err);
       log.error(`fatal: ${err.stack || err}`);
       if (win) win.webContents.send('alice:fatal', String(err.stack || err));
-      throw err;
+      // KHÔNG re-throw: xem chú thích ở `bootError`. Handler nào cần thì đọc
+      // `bootError` và trả lỗi thành câu nói được, thay vì reject im lặng.
     });
     try {
       await bootPromise;

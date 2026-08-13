@@ -35,6 +35,7 @@ if (!window.alice) {
     aliceRemove: async () => ({ ok: true }),
     aliceSetModel: async () => ({ ok: true }),
     pickFolder: async () => ({ canceled: true }),
+    testApiKey: async () => ({ error: 'chế độ xem thử' }),
     publicToggle: async () => ({ ok: true }),
     publicInfo: async () => ({
       enabled: false, mode: 'anyone', port: 8931, code: null, accounts: [],
@@ -407,12 +408,15 @@ async function openCreateAlice(required = false) {
     </div>
     <div class="field">
       <label for="ca-key">Chìa khoá (API key)</label>
-      <input id="ca-key" type="password" placeholder="dán chìa khoá vào đây" autocomplete="off">
-      <div class="desc">Chìa khoá của riêng Alice này — không dùng chung với Alice khác.</div>
+      <div style="display:flex; gap:8px">
+        <input id="ca-key" type="password" placeholder="dán chìa khoá vào đây" autocomplete="off" style="flex:1">
+        <button class="btn ghost" id="ca-key-test" style="padding:8px 16px; font-size:12px; white-space:nowrap">Kiểm tra</button>
+      </div>
+      <div class="desc" id="ca-key-desc">Chìa khoá của riêng Alice này — không dùng chung với Alice khác. Bấm <b>Kiểm tra</b> để xem nó chạy được không và lấy danh sách model.</div>
     </div>
     <div class="field">
       <label for="ca-model">Model</label>
-      <select id="ca-model"><option value="">(đang tải danh sách model…)</option></select>
+      <select id="ca-model" disabled><option value="">(kiểm tra chìa khoá trước đã)</option></select>
       <div class="desc" id="ca-model-desc">Chọn model cho Alice này — đổi được sau trong Cài đặt.</div>
     </div>
     <div class="field">
@@ -430,7 +434,60 @@ async function openCreateAlice(required = false) {
   const saveBtn = $('sheet-save');
   saveBtn.hidden = false;
   saveBtn.textContent = 'Tạo';
-  loadModelsInto($('ca-model'), $('ca-model-desc'), null);
+
+  // KHÔNG tự đi lấy danh sách model lúc mở màn hình: chưa có chìa khoá nào thì
+  // danh sách đó không nói lên được gì, và nếu engine chậm/hỏng thì ô chọn đứng
+  // mãi ở "(đang tải…)" mà không ai biết vì sao. Người dùng dán key, bấm Kiểm tra.
+  let keyOk = false;
+
+  const syncCreateBtn = () => {
+    saveBtn.disabled = !(keyOk && $('ca-model').value && $('ca-name').value.trim());
+    saveBtn.title = saveBtn.disabled
+      ? 'Nhập tên, kiểm tra chìa khoá và chọn model trước đã'
+      : 'Tạo Alice';
+  };
+  $('ca-name').addEventListener('input', syncCreateBtn);
+  $('ca-model').addEventListener('change', syncCreateBtn);
+  // Sửa key thì kết quả kiểm tra cũ hết giá trị.
+  $('ca-key').addEventListener('input', () => {
+    keyOk = false;
+    $('ca-model').disabled = true;
+    $('ca-model').innerHTML = '<option value="">(kiểm tra chìa khoá trước đã)</option>';
+    syncCreateBtn();
+  });
+  syncCreateBtn();
+
+  $('ca-key-test').onclick = async () => {
+    const btn = $('ca-key-test');
+    btn.disabled = true;
+    btn.textContent = 'Đang thử…';
+    $('ca-key-desc').textContent = 'Đang gọi thử một lượt bằng chìa khoá này — mất vài giây.';
+    try {
+      const r = await window.alice.testApiKey($('ca-key').value);
+      if (r.error) {
+        keyOk = false;
+        $('ca-key-desc').textContent = r.error;
+        return;
+      }
+      keyOk = true;
+      $('ca-key-desc').textContent = `Chìa khoá dùng được — ${r.models.length} model khả dụng (đã thử bằng ${r.tested}).`;
+      const sel = $('ca-model');
+      sel.disabled = false;
+      sel.innerHTML = [
+        '<option value="">Tự chọn (xoay vòng model free khi lỗi)</option>',
+        ...r.models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`),
+      ].join('');
+      $('ca-model-desc').textContent = 'Chọn một model rồi bấm Tạo. Đổi được sau trong Cài đặt.';
+    } catch (err) {
+      // IPC reject (app chưa boot xong, main hỏng…) — phải hiện ra, không được
+      // để nút kẹt ở "Đang thử…" như bản trước kẹt ở "Đang tạo…".
+      $('ca-key-desc').textContent = `Không kiểm tra được: ${String(err && err.message || err)}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Kiểm tra';
+      syncCreateBtn();
+    }
+  };
 
   $('ca-dir-pick').onclick = async () => {
     const r = await window.alice.pickFolder();
@@ -441,20 +498,27 @@ async function openCreateAlice(required = false) {
 
   saveBtn.onclick = async () => {
     saveBtn.disabled = true;
-    $('ca-msg').textContent = 'Đang tạo…';
-    const r = await window.alice.aliceCreate({
-      name: $('ca-name').value,
-      key: $('ca-key').value,
-      model: $('ca-model').value || null,
-      dir: $('ca-dir').value || null,
-    });
-    saveBtn.disabled = false;
-    if (r.error) { $('ca-msg').textContent = r.error; return; }
-    closeSheet();
-    // Tạo xong → vào chat với Alice vừa tạo.
-    showChat();
-    await refreshHeader();
-    await loadHistory();
+    saveBtn.textContent = 'Đang tạo…';
+    $('ca-msg').textContent = 'Đang dựng thư mục và trí nhớ cho Alice…';
+    try {
+      const r = await window.alice.aliceCreate({
+        name: $('ca-name').value,
+        key: $('ca-key').value,
+        model: $('ca-model').value || null,
+        dir: $('ca-dir').value || null,
+      });
+      if (r.error) { $('ca-msg').textContent = r.error; return; }
+      closeSheet();
+      // Tạo xong → vào chat với Alice vừa tạo.
+      showChat();
+      await refreshHeader();
+      await loadHistory();
+    } catch (err) {
+      $('ca-msg').textContent = `Không tạo được: ${String(err && err.message || err)}`;
+    } finally {
+      saveBtn.textContent = 'Tạo';
+      syncCreateBtn();
+    }
   };
 }
 
@@ -805,7 +869,16 @@ async function openPublicSheet(id, name) {
 }
 
 async function loadModelsInto(selectEl, descEl, selectedModel) {
-  const info = await window.alice.models();
+  let info;
+  try {
+    info = await window.alice.models();
+  } catch (err) {
+    // IPC reject: trước đây không ai bắt, nên ô chọn đứng mãi ở "(đang tải…)" và
+    // người dùng không có một chữ nào để biết chuyện gì đang xảy ra.
+    descEl.textContent = `Không đọc được danh sách model: ${String(err && err.message || err)}`;
+    selectEl.innerHTML = '<option value="">Tự chọn (xoay vòng model free khi lỗi)</option>';
+    return;
+  }
   if (!info.models.length) {
     descEl.textContent = info.error
       ? `Không đọc được danh sách model: ${escapeHtml(info.error)}`

@@ -69,8 +69,14 @@ class OpencodeEngine {
    * còn 7, và có model đổi tên (`ling-3.0-tiny-free` → `ling-3.0-flash-free`).
    * Bảng hard-code sẽ trỏ vào model không tồn tại.
    */
-  async listModels() {
-    const { stdout } = await this._exec(['models'], { timeout: 60000 });
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.baseDir]  đọc auth từ thư mục KHÁC — dùng để kiểm tra một
+   *   chìa khoá người dùng vừa dán mà chưa tạo Alice nào.
+   * @param {number} [opts.timeout]
+   */
+  async listModels({ baseDir = null, timeout = 45000 } = {}) {
+    const { stdout } = await this._exec(['models'], { timeout, baseDir });
     return stdout
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -105,7 +111,7 @@ class OpencodeEngine {
    * @param {function} [opts.onEvent]  nhận từng event NDJSON đã parse
    * @returns {Promise<{sessionId, text, tokens, model, events}>}
    */
-  run({ message, sessionId = null, model, cwd, onEvent = null, signal = null }) {
+  run({ message, sessionId = null, model, cwd, onEvent = null, signal = null, baseDir = null, idleMs = null }) {
     // Đã bấm dừng trước khi kịp spawn — không mở thêm tiến trình nào nữa.
     if (this._cancelled) return Promise.reject(new CancelledError());
     if (!this.available) {
@@ -130,7 +136,7 @@ class OpencodeEngine {
       const child = spawn(this.binPath, args, {
         cwd,
         windowsHide: true,
-        env: { ...process.env, ...portableEnv(this.baseDir), FORCE_COLOR: '0', NO_COLOR: '1' },
+        env: { ...process.env, ...portableEnv(baseDir || this.baseDir), FORCE_COLOR: '0', NO_COLOR: '1' },
         // `stdin: 'ignore'` — KHÔNG để mặc định 'pipe'.
         //
         // `opencode run` nhận thêm nội dung qua stdin, nên nếu stdin là một pipe
@@ -165,14 +171,14 @@ class OpencodeEngine {
        * Timeout ném lỗi như mọi lỗi khác, nên `runWithFallback` tự xoay sang model
        * kế tiếp — model treo bị loại khỏi chuỗi thay vì kéo cả app xuống.
        */
-      const idleMs = this.settings.idleTimeoutMs || 120000;
+      const idle = idleMs || this.settings.idleTimeoutMs || 120000;
       let idleTimer = null;
       const resetIdle = () => {
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           timedOut = true;
           child.kill();
-        }, idleMs);
+        }, idle);
       };
 
       if (signal) {
@@ -237,7 +243,7 @@ class OpencodeEngine {
           return;
         }
         if (timedOut && !text) {
-          reject(new Error(`Model ${model} im lặng quá ${Math.round(idleMs / 1000)}s — bỏ qua.`));
+          reject(new Error(`Model ${model} im lặng quá ${Math.round(idle / 1000)}s — bỏ qua.`));
           return;
         }
         if (code !== 0 && !text) {
@@ -334,12 +340,15 @@ class OpencodeEngine {
     return killed;
   }
 
-  _exec(args, { timeout = 30000 } = {}) {
+  _exec(args, { timeout = 30000, baseDir = null } = {}) {
     if (this._cancelled) return Promise.reject(new CancelledError());
+    if (!this.available) {
+      return Promise.reject(new Error('Không tìm thấy binary opencode trong bản cài này.'));
+    }
     return new Promise((resolve, reject) => {
       const child = spawn(this.binPath, args, {
         windowsHide: true,
-        env: { ...process.env, ...portableEnv(this.baseDir) },
+        env: { ...process.env, ...portableEnv(baseDir || this.baseDir) },
         stdio: ['ignore', 'pipe', 'pipe'], // cùng lý do như trong run()
       });
       this._probes.add(child);

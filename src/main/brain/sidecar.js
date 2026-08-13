@@ -85,6 +85,35 @@ class BrainSidecar {
   }
 
   /**
+   * Y hệt `ensureSchema()` nhưng KHÔNG chặn vòng lặp sự kiện.
+   *
+   * `spawnSync` nạp sqlalchemy + lancedb — vài giây trên máy ấm, lâu hơn nhiều ở lần
+   * chạy đầu khi Windows Defender còn quét cả cây python vừa cài. Chạy nó trong tiến
+   * trình main của Electron là ĐÓNG BĂNG TOÀN BỘ app: mọi IPC nằm chờ, nên ô chọn
+   * model đứng mãi ở "(đang tải…)" và nút Tạo treo ở "Đang tạo…". Nhìn từ ngoài
+   * giống hệt app chết.
+   */
+  ensureSchemaAsync() {
+    if (fs.existsSync(path.join(this.dataDir, 'sag.db'))) {
+      return Promise.resolve({ created: false, reason: 'already' });
+    }
+    return new Promise((resolve, reject) => {
+      const child = spawn(
+        this.pythonPath,
+        ['-c', 'import asyncio; from sag_api.core.db import init_db; asyncio.run(init_db())'],
+        { cwd: this.appDir, windowsHide: true, env: { ...process.env, ...this.env() }, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      let stderr = '';
+      child.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
+      child.on('error', (err) => reject(new Error(`Không chạy được python của brain: ${err.message}`)));
+      child.on('close', (code) => {
+        if (code === 0) resolve({ created: true });
+        else reject(new Error(`Không dựng được brain rỗng: ${stderr.trim().slice(-500)}`));
+      });
+    });
+  }
+
+  /**
    * Khoá mã hoá credential provider trong bảng settings của brain (`core/crypto.py`
    * dùng AES-GCM). Sinh một lần rồi giữ nguyên: đổi khoá là mọi credential đã lưu
    * thành rác không giải được.

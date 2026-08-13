@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('alice', {
   aliceRemove: (id) => ipcRenderer.invoke('alice:alice:remove', id),
   aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
   pickFolder: () => ipcRenderer.invoke('alice:folder:pick'),
+  // Kiểm tra key TRƯỚC khi tạo Alice: đi một chiều như setApiKey, không đọc ngược ra.
+  testApiKey: (key) => ipcRenderer.invoke('alice:auth:test', key),
   onAliceChanged: (cb) => ipcRenderer.on('alice:alice-changed', (_e, payload) => cb(payload)),
 
   // Public: biến Alice thành máy chủ (trang web chat).
