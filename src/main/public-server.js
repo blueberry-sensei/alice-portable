@@ -68,6 +68,21 @@ function newAccessCode() {
 }
 
 /**
+ * Tên cho khách vào bằng link/mã: `anonymous-<5 ký tự>`.
+ *
+ * Bỏ các ký tự dễ đọc nhầm khi nhìn qua màn hình điện thoại (0/O, 1/l/I) — tên này
+ * hiện trong lịch sử chat và người ta sẽ đọc nó cho nhau nghe.
+ */
+const NANO_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+function anonName(size = 5) {
+  let out = '';
+  for (let i = 0; i < size; i += 1) {
+    out += NANO_ALPHABET[crypto.randomInt(0, NANO_ALPHABET.length)];
+  }
+  return `anonymous-${out}`;
+}
+
+/**
  * @param {object} opts.alice       registry entry { id, name, provider }
  * @param {string} opts.baseDir     alices/<id>/
  * @param {object} opts.settings    settings chung của app
@@ -137,7 +152,7 @@ class PublicServer {
     cfg.code = newAccessCode();
     this.saveConfig(cfg);
     for (const [tok, s] of this.sessions) {
-      if (s.who === 'code') this.sessions.delete(tok);
+      if (s.kind === 'code') this.sessions.delete(tok);
     }
     return cfg.code;
   }
@@ -303,10 +318,23 @@ class PublicServer {
       return;
     }
 
-    // Kiểm tra phiên còn sống (web reload không phải vào cửa lại).
+    // Kiểm tra phiên còn sống (web reload không phải vào cửa lại). Trả kèm TÊN để
+    // trang khôi phục đúng danh tính cũ thay vì sinh một cái tên mới mỗi lần F5.
     if (req.method === 'GET' && url.pathname === '/v1/check') {
-      const ok = this._authOk(req);
-      this._json(res, ok ? 200 : 401, ok ? { ok: true } : { error: 'Hết phiên.' });
+      const name = this._whoami(req);
+      this._json(res, name ? 200 : 401, name ? { ok: true, name } : { error: 'Hết phiên.' });
+      return;
+    }
+
+    // Lịch sử cuộc trò chuyện — để trang web hiện đúng những gì đã nói, thay vì mở
+    // ra là một câu chào viết cứng trong mã.
+    if (req.method === 'GET' && url.pathname === '/v1/history') {
+      const cfg = this.config();
+      if (cfg.mode !== 'anyone' && !this._authOk(req)) {
+        this._json(res, 401, { error: 'Cần vào cửa trước đã.' });
+        return;
+      }
+      this._json(res, 200, { messages: this._history(Number(url.searchParams.get('limit')) || 60) });
       return;
     }
 
@@ -331,11 +359,30 @@ class PublicServer {
         this._json(res, 400, { error: 'Thiếu "message".' });
         return;
       }
-      this._chat(res, message);
+      // Mode `anyone` không bắt vào cửa, nhưng khách nào có phiên thì vẫn dùng
+      // đúng tên của họ; chưa có phiên thì ghi là khách vô danh.
+      this._chat(res, message, this._whoami(req) || 'anonymous');
       return;
     }
 
     this._json(res, 404, { error: 'Không có endpoint này. Xem README: GET /, POST /v1/chat' });
+  }
+
+  /**
+   * Lịch sử để hiện trên trang web: nguyên văn, kèm TÊN người đã gửi.
+   *
+   * Không kèm `meta` đầy đủ — trong đó có model và danh sách model đã hỏng, là
+   * chuyện nội bộ của chủ máy, không phải thứ khách cần thấy.
+   */
+  _history(limit) {
+    if (!this.store) return [];
+    const conv = this.store.currentConversation();
+    if (!conv) return [];
+    return this.store.recent(conv.id, Math.min(Math.max(limit, 1), 200)).map((m) => {
+      let who = null;
+      try { who = (JSON.parse(m.meta || 'null') || {}).who || null; } catch { /* meta rác */ }
+      return { role: m.role, text: m.text, ts: m.ts, who };
+    });
   }
 
   /** Hợp lệ khi có phiên còn sống. Mode `anyone` không gọi hàm này cho /v1/chat. */
@@ -351,10 +398,22 @@ class PublicServer {
     return true;
   }
 
-  _newSession(who) {
+  /**
+   * @param {string} name  tên hiển thị của khách — `anonymous-xxxxx` hoặc username
+   * @param {string} kind  'anon' | 'code' | 'account' (để `rotateCode` biết đá ai)
+   */
+  _newSession(name, kind) {
     const token = crypto.randomBytes(24).toString('base64url');
-    this.sessions.set(token, { who, expires: Date.now() + SESSION_TTL_MS });
+    this.sessions.set(token, { name, kind, expires: Date.now() + SESSION_TTL_MS });
     return token;
+  }
+
+  /** Tên của khách đang gọi, hoặc null nếu chưa có phiên. */
+  _whoami(req) {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const s = token ? this.sessions.get(token) : null;
+    if (!s || s.expires < Date.now()) return null;
+    return s.name;
   }
 
   _login(res, bodyBuf) {
@@ -366,8 +425,10 @@ class PublicServer {
     const cfg = this.config();
 
     if (cfg.mode === 'anyone') {
-      // Không có cửa thì cấp phiên luôn — trang web không cần biết ngoại lệ.
-      this._json(res, 200, { token: this._newSession('anyone'), name: 'khách' });
+      // Không có cửa, nhưng vẫn cấp phiên: khách cần một CÁI TÊN để tin của họ
+      // phân biệt được với nhau trong lịch sử chat.
+      const name = anonName();
+      this._json(res, 200, { token: this._newSession(name, 'anon'), name });
       return;
     }
 
@@ -377,7 +438,10 @@ class PublicServer {
         this._json(res, 401, { error: 'Mã truy cập không đúng.' });
         return;
       }
-      this._json(res, 200, { token: this._newSession('code'), name: 'khách' });
+      // Cùng một mã dùng chung, nhưng mỗi người một tên — không thì cả phòng nói
+      // chuyện dưới một danh tính và không ai biết câu nào của ai.
+      const name = anonName();
+      this._json(res, 200, { token: this._newSession(name, 'code'), name });
       return;
     }
 
@@ -388,7 +452,7 @@ class PublicServer {
       this._json(res, 401, { error: 'Sai tên đăng nhập hoặc mật khẩu.' });
       return;
     }
-    this._json(res, 200, { token: this._newSession(username), name: username });
+    this._json(res, 200, { token: this._newSession(username, 'account'), name: username });
   }
 
   /**
@@ -397,7 +461,7 @@ class PublicServer {
    * người bấm cùng lúc là một người ăn lỗi thì không dùng được. Hàng có trần để
    * không biến thành chỗ chứa vô hạn.
    */
-  async _chat(res, message) {
+  async _chat(res, message, who) {
     if (!this.runTurn) {
       this._json(res, 503, { error: 'Alice chưa sẵn sàng.' });
       return;
@@ -414,8 +478,8 @@ class PublicServer {
       this.busy = true;
       try {
         this.engine.setBaseDir(this.baseDir);
-        const out = await this.runTurn(message);
-        this.log.info(`public chat ok: model=${out.model || '-'} session=${out.engineSession || '-'}`);
+        const out = await this.runTurn(message, null, { who });
+        this.log.info(`public chat ok: who=${who} model=${out.model || '-'} session=${out.engineSession || '-'}`);
         this._json(res, 200, { text: out.text, model: out.model });
       } catch (err) {
         this.lastError = err.message;
@@ -462,5 +526,6 @@ class PublicServer {
 }
 
 module.exports = {
-  PublicServer, hashPassword, verifyPassword, newAccessCode, DEFAULT_PORT, MODES, MAX_BODY,
+  PublicServer, hashPassword, verifyPassword, newAccessCode, anonName,
+  DEFAULT_PORT, MODES, MAX_BODY,
 };

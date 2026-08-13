@@ -40,7 +40,15 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
    * @param {string} userText
    * @param {function} [onStream]  (partialText, event) — để UI vẽ chữ chạy
    */
-  return async function runTurn(userText, onStream = null) {
+  /**
+   * @param {string}   userText
+   * @param {function} [onStream]  (partialText, event) — để UI vẽ chữ chạy
+   * @param {object}   [opts]
+   * @param {string?}  [opts.who]  tên người gửi khi Alice đang phục vụ nhiều người
+   *   qua máy chủ public (`anonymous-x7k2q`, `nga`…). `null` = chủ máy chat trong app.
+   */
+  return async function runTurn(userText, onStream = null, opts = {}) {
+    const who = opts.who || null;
     const { conversation, seed, reason } = await memory.ensureConversation();
 
     // Lưu tin NGUYÊN VĂN, không kèm mồi. Mồi là chuyện của engine, không phải thứ
@@ -50,9 +58,13 @@ function createTurnRunner({ store, memory, engine, workDir, settings }) {
       role: 'human',
       text: userText,
       engineSession: conversation.engine_session,
+      meta: who ? { who } : null,
     });
 
-    const message = seed ? `${seed}\n\n${userText}` : userText;
+    // Nhiều người chung một Alice: model PHẢI biết ai đang nói, không thì nó trả
+    // lời người này bằng ngữ cảnh của người kia mà không hề biết mình nhầm.
+    const said = who ? `[${who}]: ${userText}` : userText;
+    const message = seed ? `${seed}\n\n${said}` : said;
 
     const out = await engine.runWithFallback({
       message,

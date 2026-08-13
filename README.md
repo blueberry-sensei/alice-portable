@@ -103,7 +103,13 @@ Một app Alice có thể chứa **nhiều Alice** — ví dụ *Alice GoDine* c
 - **chìa khoá riêng** — mỗi Alice dùng key của nó, không dùng chung;
 - **trí nhớ riêng** — lịch sử chat, brain và lịch hẹn của Alice này không lẫn
   với Alice khác;
-- **xoá được** — trong ⚙ → *Các Alice* → Xoá (mất hết dữ liệu của Alice đó).
+- **thư mục riêng** — lúc tạo, bấm **Chọn…** ở ô *Thư mục của Alice* để đặt Alice
+  vào đâu bạn muốn (ví dụ ngay trong thư mục dự án, hoặc một ổ khác cho đỡ chật).
+  Trí nhớ, chìa khoá, brain và chỗ làm việc của Alice đều nằm gọn trong đó. Để
+  trống thì Alice ở cạnh app như cũ;
+- **xoá được** — bấm **✕** ở góc thẻ Alice trên màn hình danh sách. Thư mục do
+  **bạn tự chọn** thì app không tự xoá — nó chỉ gỡ Alice khỏi danh sách rồi chỉ
+  cho bạn đường dẫn, vì đó có thể là thư mục đang chứa việc khác của bạn.
 
 ## Chat
 
@@ -140,10 +146,16 @@ tải một lần rồi thôi.
 > cho bật khi đang ở chế độ "ai có link cũng vào". Link Internet là link công khai;
 > không có cửa thì ai dò trúng cũng chat được và **tiêu API key của bạn**.
 
+**Ai đang nói** — mỗi người vào link được cấp một tên riêng: `anonymous-k7m2p` nếu
+vào bằng link/mã, hoặc chính username nếu đăng nhập bằng tài khoản. Tên hiện trên
+đầu mỗi tin, nên đọc lại lịch sử vẫn biết câu nào của ai — và Alice cũng biết mình
+đang trả lời ai. Tên giữ nguyên khi tải lại trang.
+
 Vài điều nên biết: máy bạn phải **đang bật và đang mở Alice** thì người khác mới vào
 được; Alice trả lời **một lượt một người**, ai tới sau xếp hàng chờ; và mọi người vào
-qua link đang nói chuyện trong **cùng một cuộc trò chuyện** — đừng chia sẻ Alice đang
-giữ chuyện riêng của bạn, hãy tạo một Alice riêng để public.
+qua link đang nói chuyện trong **cùng một cuộc trò chuyện** — ai vào cũng đọc được
+những gì người trước đã nói. Đừng chia sẻ Alice đang giữ chuyện riêng của bạn; hãy
+tạo một Alice riêng để public.
 
 ## Đổi ảnh Alice
 

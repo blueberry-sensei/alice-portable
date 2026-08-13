@@ -32,6 +32,19 @@ function aliceDirOf(p, id) {
   return path.join(p.alicesDir, id);
 }
 
+/**
+ * Thư mục THẬT của một Alice.
+ *
+ * Mặc định `alices/<id>/`, nhưng người dùng chọn được thư mục riêng lúc tạo (vd
+ * một thư mục dự án, hoặc ổ khác cho đỡ chật). Khi đó `alice.dir` là đường dẫn
+ * tuyệt đối và mọi thứ của Alice — chat.db, brain, chìa khoá, workspace — nằm
+ * trong đó.
+ */
+function dirOf(alice, paths = {}) {
+  if (alice && alice.dir) return alice.dir;
+  return aliceDirOf(resolve(paths), alice.id);
+}
+
 function load(paths = {}) {
   const p = resolve(paths);
   try {
@@ -54,10 +67,19 @@ function save(state, paths = {}) {
  * (chọn lúc tạo, đổi được sau) — không lẫn với Alice khác.
  * Trả { state, alice }.
  */
-function create({ name, key, model = null }, paths = {}) {
+function create({ name, key, model = null, dir = null }, paths = {}) {
   const p = resolve(paths);
   const state = load(paths);
   const id = crypto.randomUUID();
+
+  // Thư mục do người dùng chọn: giữ nguyên đường dẫn họ chỉ, nhưng đặt Alice vào
+  // một thư mục con mang TÊN của nó — chọn "D:\Work" mà đổ thẳng chat.db vào đó là
+  // rải rác file vào thư mục đang có việc khác.
+  const custom = String(dir || '').trim();
+  const home = custom
+    ? path.resolve(custom, slug(name) || id.slice(0, 8))
+    : aliceDirOf(p, id);
+
   const alice = {
     id,
     name: String(name || '').trim() || 'Alice',
@@ -65,17 +87,27 @@ function create({ name, key, model = null }, paths = {}) {
     model: model || null,
     created_at: Date.now(),
   };
+  if (custom) alice.dir = home;
   state.alices.push(alice);
   if (!state.active) state.active = id;
   save(state, paths);
 
-  const dir = aliceDirOf(p, id);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.mkdirSync(path.join(dir, 'brain'), { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(path.join(home, 'brain'), { recursive: true });
   if (key && String(key).trim()) {
-    auth.setApiKey('opencode', String(key).trim(), dir);
+    auth.setApiKey('opencode', String(key).trim(), home);
   }
   return { state, alice };
+}
+
+/** Tên thư mục an toàn từ tên Alice: bỏ dấu, bỏ ký tự Windows không nhận. */
+function slug(name) {
+  return String(name || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd').replace(/Đ/g, 'D')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
 }
 
 /** Cập nhật một số trường của Alice (vd model). Trả state mới. */
@@ -99,15 +131,25 @@ function remove(id, paths = {}) {
   const state = load(paths);
   const idx = state.alices.findIndex((a) => a.id === id);
   if (idx < 0) return { state, removed: false };
+  const alice = state.alices[idx];
   state.alices.splice(idx, 1);
   if (state.active === id) state.active = state.alices.length ? state.alices[0].id : null;
   save(state, paths);
 
-  const dir = aliceDirOf(p, id);
-  if (path.dirname(dir) === path.resolve(p.alicesDir) && fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+  // Thư mục do CHÍNH APP tạo (`alices/<id>/`) thì xoá. Thư mục do NGƯỜI DÙNG chỉ
+  // thì không đụng vào: nó nằm ngoài vùng app quản, có thể là thư mục dự án đang
+  // có việc khác, và xoá nhầm ở đó là mất dữ liệu không lấy lại được.
+  const auto = aliceDirOf(p, id);
+  const home = alice.dir || auto;
+  let keptDir = null;
+  if (!alice.dir && path.dirname(auto) === path.resolve(p.alicesDir) && fs.existsSync(auto)) {
+    // `maxRetries`: trên Windows, chat.db/lancedb vừa đóng vẫn còn handle treo vài
+    // trăm ms — xoá phát đầu ăn EBUSY và trước đây nó ném thẳng ra làm đơ UI.
+    fs.rmSync(auto, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+  } else if (alice.dir) {
+    keptDir = home;
   }
-  return { state, removed: true };
+  return { state, removed: true, keptDir };
 }
 
 /**
@@ -165,4 +207,4 @@ function migrateLegacy({ name }, paths = {}) {
   return state;
 }
 
-module.exports = { load, save, create, update, remove, migrateLegacy, resolve, aliceDirOf };
+module.exports = { load, save, create, update, remove, migrateLegacy, resolve, aliceDirOf, dirOf, slug };

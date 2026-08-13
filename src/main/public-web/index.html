@@ -9,7 +9,12 @@
   `input, textarea` bên dưới). Thiếu một trong hai là vẫn nhảy.
   `viewport-fit=cover`: iPhone tai thỏ — cần để `env(safe-area-inset-*)` có giá trị.
 -->
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!--
+  `interactive-widget=resizes-content`: Android Chrome mặc định để bàn phím ĐÈ lên
+  trang thay vì thu nhỏ trang lại, nên ô nhập nằm dưới bàn phím. Cờ này bảo nó thu
+  khung nhìn — iOS không hiểu cờ này, phần đó xử bằng visualViewport ở cuối trang.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0a1022">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -37,11 +42,19 @@
   }
   @supports (height: 100dvh) { :root { --vh: 100dvh; } }
 
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; height: 100%; overflow: hidden; }
+  /*
+    Khung app NEO vào khung nhìn nhìn-thấy-được, không neo vào trang.
+    iOS mở bàn phím thì nó KHÔNG thu trang lại mà cuộn "khung nhìn thị giác" xuống;
+    một body cao bằng `visualViewport.height` nhưng vẫn nằm ở đỉnh trang sẽ đặt ô
+    nhập ở lưng chừng, cách bàn phím một khoảng lớn — đúng lỗi "chatbar bị đẩy lên
+    siêu cao, sát head". `position:fixed` + dịch theo `offsetTop` mới dán được nó
+    vào đúng vùng đang nhìn thấy.
+  */
   body {
+    position: fixed; top: 0; left: 0; right: 0;
     font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
     background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-2) 60%, var(--bg-3) 100%);
-    background-attachment: fixed;
     color: var(--text);
     height: var(--vh);
     display: flex; flex-direction: column;
@@ -85,8 +98,14 @@
     padding-right: calc(16px + env(safe-area-inset-right));
     display: flex; flex-direction: column; gap: 10px;
   }
-  .row { display: flex; }
-  .row.mine { justify-content: flex-end; }
+  .row { display: flex; flex-direction: column; align-items: flex-start; }
+  .row.mine { align-items: flex-end; }
+  /* Tên người gửi — chỉ hiện cho tin của NGƯỜI KHÁC. Nhiều người chung một Alice
+     mà không có tên thì đọc lại lịch sử không biết câu nào của ai. */
+  .author {
+    font-size: 11px; color: var(--muted); font-weight: 700;
+    margin: 0 0 3px 13px; letter-spacing: .01em;
+  }
   .bubble {
     max-width: 85%;
     padding: 10px 14px; border-radius: 16px 16px 16px 5px;
@@ -99,6 +118,9 @@
     background: linear-gradient(160deg, var(--primary-soft), var(--primary-deep));
     color: var(--on-primary); font-weight: 600;
   }
+  /* Tin của người khác cũng nằm bên trái như Alice — cần một dấu hiệu để không
+     đọc nhầm lời của khách thành lời của Alice. */
+  .row.other .bubble { background: #1b2440; border-color: var(--border-2); }
   .bubble.err { border-color: #5c2b2e; background: #2a1215; color: var(--danger); }
   .typing { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
 
@@ -199,8 +221,10 @@
 const MODE = '__MODE__';
 const API = '';
 let token = localStorage.getItem('alice-token') || null;
+let myName = null;
 
 const $ = (id) => document.getElementById(id);
+const auth = () => (token ? { Authorization: 'Bearer ' + token } : {});
 
 async function init() {
   try {
@@ -208,19 +232,36 @@ async function init() {
     const d = await r.json();
     $('alice-name').textContent = d.name || 'Alice';
     document.title = 'Chat với ' + ($('alice-name').textContent);
-    if (d.avatar) $('ava').innerHTML = '<img alt="">', $('ava').firstChild.src = d.avatar;
+    if (d.avatar) { $('ava').innerHTML = '<img alt="">'; $('ava').firstChild.src = d.avatar; }
   } catch { /* máy chủ vẫn chạy, chỉ chưa lấy được tên */ }
 
-  if (MODE === 'anyone') { showChat(); return; }
-
-  // Đã có phiên còn sống thì vào thẳng, không hỏi lại.
+  // Phiên cũ còn sống thì giữ NGUYÊN tên cũ — mỗi lần F5 mà đổi tên thì lịch sử
+  // chat thành ra một đám người lạ trong khi vẫn chỉ là một người.
   if (token) {
     try {
-      const ok = await fetch(API + '/v1/check', { headers: { Authorization: 'Bearer ' + token } });
-      if (ok.ok) { showChat(); return; }
-    } catch { /* mất mạng — cứ hiện màn hỏi */ }
+      const r = await fetch(API + '/v1/check', { headers: auth() });
+      if (r.ok) { myName = (await r.json()).name || null; enterChat(); return; }
+    } catch { /* mất mạng — rơi xuống nhánh vào cửa lại */ }
     token = null;
+    myName = null;
     localStorage.removeItem('alice-token');
+  }
+
+  // Không có cửa: vẫn xin một phiên để có TÊN riêng (anonymous-xxxxx).
+  if (MODE === 'anyone') {
+    try {
+      const r = await fetch(API + '/v1/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      if (r.ok) {
+        const d = await r.json();
+        token = d.token;
+        myName = d.name;
+        localStorage.setItem('alice-token', token);
+      }
+    } catch { /* không xin được tên thì vẫn chat được, chỉ là vô danh */ }
+    enterChat();
+    return;
   }
   showGate();
 }
@@ -261,9 +302,10 @@ async function enter() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { $('gate-err').textContent = d.error || 'Không vào được.'; return; }
     token = d.token;
+    myName = d.name || null;
     localStorage.setItem('alice-token', token);
     $('gate-view').hidden = true;
-    showChat();
+    enterChat();
   } catch {
     $('gate-err').textContent = 'Không kết nối được máy chủ.';
   } finally {
@@ -271,20 +313,46 @@ async function enter() {
   }
 }
 
-function showChat() {
+async function enterChat() {
   $('gate-view').hidden = true;
   $('chat-view').hidden = false;
   $('compose').hidden = false;
-  $('alice-sub').textContent = 'Alice nhớ cuộc trò chuyện này';
-  addMsg('alice', 'Chào bạn, mình có thể giúp gì?');
+  $('alice-sub').textContent = myName ? `bạn đang là ${myName}` : 'Alice nhớ cuộc trò chuyện này';
+
+  // Lịch sử THẬT của Alice, không phải một câu chào viết cứng trong mã: người vào
+  // sau đọc được cuộc trò chuyện đang diễn ra, và F5 không mất gì.
+  let messages = [];
+  try {
+    const r = await fetch(API + '/v1/history?limit=60', { headers: auth() });
+    if (r.ok) messages = (await r.json()).messages || [];
+  } catch { /* không đọc được thì mở màn hình trống, vẫn chat được */ }
+
+  if (!messages.length) {
+    addMsg({ role: 'alice', text: 'Chào bạn, mình có thể giúp gì?' });
+  } else {
+    for (const m of messages) addMsg(m);
+  }
 }
 
-function addMsg(who, text, isErr) {
+/**
+ * @param {object} m  { role: 'human'|'alice', text, who }
+ * `who` là tên người gửi. Tin của CHÍNH mình nằm bên phải và không cần đề tên.
+ */
+function addMsg(m, isErr) {
+  const mine = m.role === 'human' && (!m.who || m.who === myName);
+  const other = m.role === 'human' && !mine;
+
   const row = document.createElement('div');
-  row.className = 'row' + (who === 'me' ? ' mine' : '');
+  row.className = 'row' + (mine ? ' mine' : '') + (other ? ' other' : '');
+  if (other && m.who) {
+    const a = document.createElement('div');
+    a.className = 'author';
+    a.textContent = m.who;                   // textContent: tên do máy chủ cấp,
+    row.appendChild(a);                      // nhưng vẫn không nhét thẳng vào HTML
+  }
   const b = document.createElement('div');
   b.className = 'bubble' + (isErr ? ' err' : '');
-  b.textContent = text;                      // textContent: câu trả lời của model
+  b.textContent = m.text;                    // textContent: câu trả lời của model
   row.appendChild(b);                        // là nội dung không đáng tin
   $('chat-view').appendChild(row);
   scrollDown();
@@ -308,7 +376,7 @@ async function send() {
   if (!text || busy) return;
   msg.value = '';
   autoGrow();
-  addMsg('me', text);
+  addMsg({ role: 'human', text, who: myName });
   busy = true;
   $('send').disabled = true;
 
@@ -319,17 +387,18 @@ async function send() {
   scrollDown();
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) headers.Authorization = 'Bearer ' + token;
     const r = await fetch(API + '/v1/chat', {
-      method: 'POST', headers, body: JSON.stringify({ message: text }),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth() },
+      body: JSON.stringify({ message: text }),
     });
     const d = await r.json().catch(() => ({}));
     typing.remove();
     if (!r.ok) {
-      addMsg('alice', d.error || 'Có lỗi không rõ.', true);
+      addMsg({ role: 'alice', text: d.error || 'Có lỗi không rõ.' }, true);
       if (r.status === 401) {
         token = null;
+        myName = null;
         localStorage.removeItem('alice-token');
         $('chat-view').hidden = true;
         $('compose').hidden = true;
@@ -337,10 +406,10 @@ async function send() {
       }
       return;
     }
-    addMsg('alice', d.text);
+    addMsg({ role: 'alice', text: d.text });
   } catch {
     typing.remove();
-    addMsg('alice', 'Không kết nối được máy chủ.', true);
+    addMsg({ role: 'alice', text: 'Không kết nối được máy chủ.' }, true);
   } finally {
     busy = false;
     $('send').disabled = false;
@@ -354,14 +423,27 @@ msg.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
-/* Bàn phím điện thoại mở ra làm khung nhìn thấp đi mà `100dvh` không đổi ngay —
-   tin cuối bị bàn phím che. Bám theo visualViewport rồi cuộn lại xuống đáy. */
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => {
-    document.documentElement.style.setProperty('--vh', window.visualViewport.height + 'px');
-    scrollDown();
-  });
+/*
+ * Dán khung app vào ĐÚNG vùng đang nhìn thấy khi bàn phím mở ra.
+ *
+ * Chỉ đặt chiều cao là chưa đủ, và đó là lỗi của bản trước: iOS không thu trang
+ * lại mà cuộn khung nhìn thị giác xuống dưới, nên một body cao bằng
+ * `visualViewport.height` vẫn nằm ở đỉnh TRANG — ô nhập trồi lên gần header, cách
+ * bàn phím một khoảng lớn. `offsetTop` là phần bị bỏ sót; dịch theo nó thì đáy
+ * khung nằm sát mép trên bàn phím.
+ */
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    document.documentElement.style.setProperty('--vh', vv.height + 'px');
+    document.body.style.transform = `translateY(${vv.offsetTop}px)`;
+  };
+  vv.addEventListener('resize', () => { fit(); scrollDown(); });
+  vv.addEventListener('scroll', fit);
+  fit();
 }
+// Bàn phím bung ra sau khi focus một nhịp — cuộn lại để tin cuối không bị che.
+msg.addEventListener('focus', () => setTimeout(scrollDown, 300));
 
 init();
 </script>

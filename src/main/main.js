@@ -126,6 +126,18 @@ function currentAlice() {
   return registry.alices.find((a) => a.id === registry.active) || null;
 }
 
+/**
+ * Thư mục của một Alice — KHÔNG suy thẳng từ id nữa.
+ *
+ * Alice tạo với thư mục do người dùng chọn sống ở đường dẫn riêng (`alice.dir`);
+ * `config.aliceDir(id)` chỉ đúng cho Alice mặc định. Dùng nhầm hàm cũ là mở nhầm
+ * chat.db — Alice mất trí nhớ mà nhìn ngoài vẫn trả lời trơn tru.
+ */
+function aliceDirFor(id) {
+  const a = registry.alices.find((x) => x.id === id);
+  return a ? registryModule.dirOf(a) : config.aliceDir(id);
+}
+
 /** Nén bằng chính model đang dùng — dùng chung cho mọi Alice. */
 function makeSummarizer() {
   return async (messages) => {
@@ -169,7 +181,7 @@ async function activateAlice(id) {
   registry.active = id;
   registryModule.save(registry);
 
-  const base = config.aliceDir(id);
+  const base = aliceDirFor(id);
   engine.setBaseDir(base);
   // Model là của RIÊNG Alice (chọn lúc tạo, đổi trong Settings của nó).
   engine.settings = { ...settings, model: alice.model || null };
@@ -188,8 +200,11 @@ async function activateAlice(id) {
     }
   }
 
-  const brainMcp = brain && brain.available ? brain.mcpConfig() : null;
-  const workDir = provisionWorkspace(settings, { brainMcp });
+  // Chỗ làm việc RIÊNG của Alice này, nằm trong thư mục của chính nó. Trước đây
+  // mọi Alice dùng chung `alice-data/workspace`, nên file Alice này tạo ra lại nằm
+  // trong tầm với của Alice khác — và người dùng chọn thư mục riêng cho Alice thì
+  // nó vẫn đi làm việc ở một nơi hoàn toàn khác.
+  const workDir = provisionWorkspace(settings, { brainMcp, dir: path.join(base, 'workspace') });
 
   runTurn = createTurnRunner({ store, memory, engine, workDir, settings });
   scheduler = new Scheduler({ store, runTurn, log });
@@ -235,7 +250,7 @@ async function boot() {
 
 ipcMain.handle('alice:status', async () => {
   await bootPromise;
-  const base = registry.active ? config.aliceDir(registry.active) : null;
+  const base = registry.active ? aliceDirFor(registry.active) : null;
   return {
     root: config.ROOT,
     dataDir: config.DATA_DIR,
@@ -261,7 +276,7 @@ ipcMain.handle('alice:alice:list', async () => {
   await bootPromise;
   // Dashboard cần đủ: tên, đường dẫn folder, avatar, có key chưa, public chưa.
   const alices = registry.alices.map((a) => {
-    const base = config.aliceDir(a.id);
+    const base = aliceDirFor(a.id);
     const pub = publicServers.get(a.id);
     return {
       ...a,
@@ -274,15 +289,28 @@ ipcMain.handle('alice:alice:list', async () => {
   return { alices, active: registry.active };
 });
 
-ipcMain.handle('alice:alice:create', async (_e, { name, key, model }) => {
+ipcMain.handle('alice:folder:pick', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Chọn thư mục cho Alice',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (res.canceled || !res.filePaths.length) return { canceled: true };
+  return { dir: res.filePaths[0] };
+});
+
+ipcMain.handle('alice:alice:create', async (_e, { name, key, model, dir }) => {
   await bootPromise;
   const nameT = String(name || '').trim();
   const keyT = String(key || '').trim();
   if (!nameT) return { error: 'Nhập tên cho Alice.' };
   if (!keyT) return { error: 'Alice cần một chìa khoá riêng.' };
-  const { state, alice } = registryModule.create({ name: nameT, key: keyT, model: model || null });
+  const dirT = String(dir || '').trim();
+  if (dirT && !fs.existsSync(dirT)) return { error: `Không thấy thư mục: ${dirT}` };
+  const { state, alice } = registryModule.create({
+    name: nameT, key: keyT, model: model || null, dir: dirT || null,
+  });
   registry = state;
-  log.info(`alice created: ${alice.id} (${alice.name}) model=${alice.model || 'auto'}`);
+  log.info(`alice created: ${alice.id} (${alice.name}) model=${alice.model || 'auto'} dir=${alice.dir || 'mặc định'}`);
   try {
     await activateAlice(alice.id);
   } catch (err) {
@@ -325,10 +353,36 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
     tun.stop();
     tunnels.delete(id);
   }
-  const { state, removed } = registryModule.remove(id);
+
+  // Xoá Alice ĐANG MỞ: phải buông hết file handle TRƯỚC khi xoá thư mục. Trên
+  // Windows, chat.db (WAL) và lancedb của brain đang mở là `fs.rm` ăn EBUSY —
+  // ngoại lệ ném ra giữa IPC, renderer chờ một promise không bao giờ về, và app
+  // trông như treo. Đúng triệu chứng "xoá Alice thì lag, đơ, UI không cập nhật".
+  if (registry.active === id) {
+    if (scheduler) scheduler.stop();
+    if (brain) brain.stop();
+    if (store) { store.close(); store = null; }
+    scheduler = null;
+    brain = null;
+    memory = null;
+    runTurn = null;
+  }
+
+  let removed;
+  let state;
+  let keptDir = null;
+  try {
+    ({ state, removed, keptDir } = registryModule.remove(id));
+  } catch (err) {
+    // Xoá file hỏng thì Alice đã rời danh sách rồi — nói thẳng chỗ còn sót thay vì
+    // để người dùng ngồi nhìn màn hình đứng im.
+    log.error(`alice remove: xoá thư mục hỏng: ${err.message}`);
+    registry = registryModule.load();
+    return { error: `Đã gỡ Alice khỏi danh sách nhưng chưa xoá được thư mục: ${err.message}` };
+  }
   registry = state;
   if (!removed) return { error: 'Không tìm thấy Alice.' };
-  log.info(`alice removed: ${id}`);
+  log.info(`alice removed: ${id}${keptDir ? ` (giữ thư mục ${keptDir})` : ''}`);
   if (registry.active) {
     await activateAlice(registry.active);
   } else {
@@ -341,7 +395,7 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
     runTurn = null;
     if (win) win.webContents.send('alice:alice-changed', { id: null, alices: [], active: null });
   }
-  return { ok: true };
+  return { ok: true, keptDir };
 });
 
 // ── public: biến Alice thành máy chủ ───────────────────────────────────────
@@ -352,7 +406,7 @@ function publicServerFor(id) {
   if (!pub) {
     const alice = registry.alices.find((a) => a.id === id);
     if (!alice) throw new Error('Không tìm thấy Alice.');
-    const base = config.aliceDir(id);
+    const base = aliceDirFor(id);
     const bs = new BrainSidecar(settings.brain || {}, { dataDir: path.join(base, 'brain') });
     pub = new PublicServer({
       alice,
@@ -597,7 +651,7 @@ ipcMain.handle('alice:clipboard:write', async (_e, text) => {
 });
 
 ipcMain.handle('alice:avatar:get', async () => {
-  const base = registry.active ? config.aliceDir(registry.active) : null;
+  const base = registry.active ? aliceDirFor(registry.active) : null;
   return { uri: avatar.current(base), custom: avatar.isCustom(base) };
 });
 
@@ -608,7 +662,7 @@ ipcMain.handle('alice:avatar:pick', async () => {
     filters: [{ name: 'Ảnh', extensions: avatar.ALLOWED.map((e) => e.slice(1)) }],
   });
   if (res.canceled || !res.filePaths.length) return { canceled: true };
-  const base = registry.active ? config.aliceDir(registry.active) : null;
+  const base = registry.active ? aliceDirFor(registry.active) : null;
   if (!base) return { error: 'Chưa có Alice nào.' };
   try {
     return { uri: avatar.set(res.filePaths[0], base), custom: true };
@@ -618,14 +672,14 @@ ipcMain.handle('alice:avatar:pick', async () => {
 });
 
 ipcMain.handle('alice:avatar:reset', async () => {
-  const base = registry.active ? config.aliceDir(registry.active) : null;
+  const base = registry.active ? aliceDirFor(registry.active) : null;
   if (!base) return { uri: avatar.current(null), custom: false };
   return { uri: avatar.reset(base), custom: false };
 });
 
 ipcMain.handle('alice:auth:set', async (_e, { provider, key }) => {
   if (!provider || !key) return { error: 'Thiếu provider hoặc key.' };
-  const base = registry.active ? config.aliceDir(registry.active) : null;
+  const base = registry.active ? aliceDirFor(registry.active) : null;
   if (!base) return { error: 'Chưa có Alice nào.' };
   try {
     return auth.setApiKey(provider, key, base);
@@ -799,6 +853,11 @@ ipcMain.handle('alice:send', async (event, text) => {
     ].filter(Boolean).join(' '));
     return res;
   } catch (err) {
+    // Người dùng bấm dừng không phải một lỗi — UI không được vẽ nó thành bong bóng đỏ.
+    if (err.cancelled) {
+      log.info('turn cancelled by user');
+      return { canceled: true };
+    }
     log.error(`turn failed: ${err.message}`);
     return { error: String(err.message || err) };
   } finally {

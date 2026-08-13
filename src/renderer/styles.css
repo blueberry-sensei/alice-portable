@@ -119,6 +119,9 @@ body {
   transition: transform .22s cubic-bezier(.34,1.56,.64,1), border-color .2s ease, box-shadow .2s ease;
 }
 .dash-card:hover { transform: translateY(-3px); border-color: var(--primary); box-shadow: 0 0 30px -12px rgba(155,107,255,.8); }
+/* Đang xoá: chặn bấm tiếp và nói rõ là app đang làm việc, không phải đang treo. */
+.dash-card.busy { opacity: .45; pointer-events: none; }
+.dash-card.busy:hover { transform: none; }
 .dash-card .card-ava {
   width: 74px; height: 74px; border-radius: 22px; overflow: hidden;
   border: 1px solid var(--border-2); background: var(--deep);

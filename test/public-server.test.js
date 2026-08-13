@@ -101,7 +101,9 @@ test('public server: mode anyone — không cần token, chat trả lời, có t
       body: JSON.stringify({ message: 'hôm nay thế nào' }),
     });
     assert.equal(ok.status, 200);
-    assert.equal((await ok.json()).text, 'trả lời: hôm nay thế nào');
+    // Model PHẢI nhận kèm tên người nói: nhiều người chung một Alice, không có tên
+    // thì nó trả lời người này bằng ngữ cảnh của người kia mà không biết mình nhầm.
+    assert.match((await ok.json()).text, /^trả lời: \[anonymous/);
 
     const who = await fetch(`http://127.0.0.1:${port}/v1/who`);
     assert.equal(who.status, 200);
@@ -222,7 +224,7 @@ test('public server: mode account — phải đăng nhập mới chat được',
       body: JSON.stringify({ message: 'xin chào' }),
     });
     assert.equal(ok.status, 200);
-    assert.equal((await ok.json()).text, 'trả lời: xin chào');
+    assert.equal((await ok.json()).text, 'trả lời: [nga]: xin chào', 'model phải biết ai đang nói');
 
     const check = await fetch(`http://127.0.0.1:${port}/v1/check`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -301,4 +303,103 @@ test('public server: mật khẩu KHÔNG lưu plaintext', () => {
   assert.equal(hash.length, 128, 'scrypt 64 byte → 128 hex');
   const { hash: h2 } = hashPassword('mat-khau');
   assert.notEqual(hash, h2, 'cùng mật khẩu, salt khác → hash khác');
+});
+
+// ── danh tính khách + lịch sử ────────────────────────────────────────────────
+
+test('public server: mỗi khách một TÊN riêng, giữ nguyên qua reload', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    const join = async () => (await (await fetch(`http://127.0.0.1:${port}/v1/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })).json());
+
+    const a = await join();
+    const b = await join();
+    assert.match(a.name, /^anonymous-[2-9a-z]{5}$/, `tên phải dạng anonymous-xxxxx, nhận ${a.name}`);
+    assert.notEqual(a.name, b.name, 'hai khách khác nhau phải khác tên');
+
+    // Reload trang = gọi /v1/check bằng token cũ → PHẢI trả lại đúng tên cũ, không
+    // sinh tên mới (không thì lịch sử chat thành một đám người lạ mà chỉ là một người).
+    const chk = await fetch(`http://127.0.0.1:${port}/v1/check`, {
+      headers: { Authorization: `Bearer ${a.token}` },
+    });
+    assert.equal(chk.status, 200);
+    assert.equal((await chk.json()).name, a.name);
+  } finally {
+    server.stop();
+  }
+});
+
+test('public server: mode account — tên hiển thị là username, không phải anonymous', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  server.saveConfig({
+    enabled: false, mode: 'account', port: 0,
+    accounts: [{ username: 'nga', ...hashPassword('mat-khau-123') }],
+  });
+  const port = await freePort();
+  await server.start(port);
+  try {
+    const d = await (await fetch(`http://127.0.0.1:${port}/v1/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'nga', password: 'mat-khau-123' }),
+    })).json();
+    assert.equal(d.name, 'nga');
+  } finally {
+    server.stop();
+  }
+});
+
+test('public server: /v1/history trả lịch sử THẬT kèm tên người gửi', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  const port = await freePort();
+  await server.start(port);
+
+  try {
+    // Chưa nói gì → rỗng. Trang web hiện câu chào của chính nó, không bịa ra lịch sử.
+    const empty = await (await fetch(`http://127.0.0.1:${port}/v1/history`)).json();
+    assert.deepEqual(empty.messages, []);
+
+    const { token, name } = await (await fetch(`http://127.0.0.1:${port}/v1/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })).json();
+
+    await fetch(`http://127.0.0.1:${port}/v1/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ message: 'ai đang nói đây' }),
+    });
+
+    const { messages } = await (await fetch(`http://127.0.0.1:${port}/v1/history`)).json();
+    assert.equal(messages.length, 2, 'một tin của khách + một tin của Alice');
+    assert.equal(messages[0].role, 'human');
+    assert.equal(messages[0].text, 'ai đang nói đây');
+    assert.equal(messages[0].who, name, 'tin của khách phải mang đúng tên khách');
+    assert.equal(messages[1].role, 'alice');
+    assert.equal(messages[1].who, null);
+    // Không rò model / danh sách model hỏng ra cho khách.
+    assert.equal(messages[1].meta, undefined);
+  } finally {
+    server.stop();
+  }
+});
+
+test('public server: mode code — /v1/history cần vào cửa trước', async () => {
+  const base = tmpBase();
+  const server = makeServer(base);
+  server.saveConfig({ enabled: false, mode: 'code', port: 0, code: '55556666', accounts: [] });
+  const port = await freePort();
+  await server.start(port);
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/history`);
+    assert.equal(r.status, 401, 'chưa nhập mã thì không được đọc chuyện của người khác');
+  } finally {
+    server.stop();
+  }
 });

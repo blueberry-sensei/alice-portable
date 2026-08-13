@@ -34,6 +34,7 @@ if (!window.alice) {
     aliceSelect: async () => ({ ok: true }),
     aliceRemove: async () => ({ ok: true }),
     aliceSetModel: async () => ({ ok: true }),
+    pickFolder: async () => ({ canceled: true }),
     publicToggle: async () => ({ ok: true }),
     publicInfo: async () => ({
       enabled: false, mode: 'anyone', port: 8931, code: null, accounts: [],
@@ -131,10 +132,18 @@ async function renderDashboard() {
       e.stopPropagation();
       const alice = alices.find((a) => a.id === x.dataset.x);
       if (!confirm(`Xoá Alice ${alice ? alice.name : 'này'}? Toàn bộ trí nhớ, lịch hẹn, chìa khoá và máy chủ của Alice đó sẽ mất hẳn.`)) return;
+      // Xoá phải đóng brain + chat db rồi mới xoá được thư mục — mất một lúc. Không
+      // nói gì thì người dùng bấm tiếp vào card và tưởng app treo.
+      const card = x.closest('.dash-card');
+      card.classList.add('busy');
+      card.querySelector('.card-name').textContent = 'Đang xoá…';
       const r = await window.alice.aliceRemove(x.dataset.x);
-      if (r.error) { alert(r.error); return; }
       await renderDashboard();
       await refreshHeader();
+      if (r.error) { alert(r.error); return; }
+      if (r.keptDir) {
+        alert(`Đã gỡ Alice khỏi danh sách.\n\nThư mục của Alice do bạn tự chọn nên app KHÔNG tự xoá:\n${r.keptDir}\n\nMuốn xoá hẳn thì xoá thư mục đó bằng tay.`);
+      }
     };
   }
   for (const b of $('dash-grid').querySelectorAll('.card-pub')) {
@@ -294,6 +303,10 @@ function setBusy(v) {
 
 async function send() {
   if (busy) {
+    // Chỉ RA LỆNH dừng. Lượt đang chạy sẽ tự kết thúc với `canceled: true` và dọn
+    // UI ở dưới — dọn ngay tại đây là hai chỗ cùng sửa một khung hình.
+    sendBtn.disabled = true;
+    sendBtn.title = 'Đang dừng…';
     await window.alice.cancel();
     return;
   }
@@ -313,6 +326,13 @@ async function send() {
   liveBubble = null;
   setBusy(false);
 
+  if (res && res.canceled) {
+    // Đã dừng: giữ lại phần chữ đã chảy ra (nó có thật), chỉ gỡ con trỏ nhấp nháy.
+    const partial = document.querySelector('.bubble.live');
+    if (partial) partial.classList.remove('live');
+    $('subtitle').textContent = 'Đã dừng lượt này';
+    return;
+  }
   if (res && res.error) {
     addMessage('alice', res.error, { error: true });
     return;
@@ -395,6 +415,15 @@ async function openCreateAlice(required = false) {
       <select id="ca-model"><option value="">(đang tải danh sách model…)</option></select>
       <div class="desc" id="ca-model-desc">Chọn model cho Alice này — đổi được sau trong Cài đặt.</div>
     </div>
+    <div class="field">
+      <label for="ca-dir">Thư mục của Alice</label>
+      <div style="display:flex; gap:8px">
+        <input id="ca-dir" type="text" placeholder="(mặc định — nằm trong alice-data)" readonly style="flex:1">
+        <button class="btn ghost" id="ca-dir-pick" style="padding:8px 14px; font-size:12px; white-space:nowrap">Chọn…</button>
+        <button class="btn ghost" id="ca-dir-clear" style="padding:8px 12px; font-size:12px">✕</button>
+      </div>
+      <div class="desc">Nơi Alice này sống và làm việc — trí nhớ, chìa khoá, brain và thư mục làm việc đều nằm trong đó. Để trống thì Alice ở cạnh app.</div>
+    </div>
     <div id="ca-msg" class="desc"></div>
   `, null);
   $('sheet-close').textContent = required ? 'Để sau' : 'Đóng';
@@ -403,12 +432,23 @@ async function openCreateAlice(required = false) {
   saveBtn.textContent = 'Tạo';
   loadModelsInto($('ca-model'), $('ca-model-desc'), null);
 
+  $('ca-dir-pick').onclick = async () => {
+    const r = await window.alice.pickFolder();
+    if (r.canceled || r.error) return;
+    $('ca-dir').value = r.dir;
+  };
+  $('ca-dir-clear').onclick = () => { $('ca-dir').value = ''; };
+
   saveBtn.onclick = async () => {
+    saveBtn.disabled = true;
+    $('ca-msg').textContent = 'Đang tạo…';
     const r = await window.alice.aliceCreate({
       name: $('ca-name').value,
       key: $('ca-key').value,
       model: $('ca-model').value || null,
+      dir: $('ca-dir').value || null,
     });
+    saveBtn.disabled = false;
     if (r.error) { $('ca-msg').textContent = r.error; return; }
     closeSheet();
     // Tạo xong → vào chat với Alice vừa tạo.

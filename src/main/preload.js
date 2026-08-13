@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('alice', {
   aliceSelect: (id) => ipcRenderer.invoke('alice:alice:select', id),
   aliceRemove: (id) => ipcRenderer.invoke('alice:alice:remove', id),
   aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
+  pickFolder: () => ipcRenderer.invoke('alice:folder:pick'),
   onAliceChanged: (cb) => ipcRenderer.on('alice:alice-changed', (_e, payload) => cb(payload)),
 
   // Public: biến Alice thành máy chủ (trang web chat).

@@ -23,6 +23,22 @@ const { portableEnv } = require('./auth');
 
 const SESSION_RE = /^ses_[A-Za-z0-9]+$/;
 
+/**
+ * Lỗi của lượt bị NGƯỜI DÙNG dừng — phải phân biệt được với lỗi model.
+ *
+ * Không phân biệt được chính là bug "bấm dừng không ăn": `runWithFallback` thấy lượt
+ * hỏng thì xoay sang model kế tiếp, mà giết tiến trình con TRÔNG y hệt một model
+ * hỏng. Bấm dừng khi đang xoay vòng model free = giết model này để nó chạy model
+ * sau, và cứ thế hết cả chuỗi.
+ */
+class CancelledError extends Error {
+  constructor() {
+    super('Đã dừng lượt này theo yêu cầu.');
+    this.name = 'CancelledError';
+    this.cancelled = true;
+  }
+}
+
 class OpencodeEngine {
   constructor(settings) {
     this.settings = settings;
@@ -30,6 +46,9 @@ class OpencodeEngine {
     this.binPath = found.path;
     this.binSource = found.source; // bundled | host | missing
     this._child = null;
+    this._cancelled = false;
+    // Tiến trình phụ (`opencode models`) — cũng phải giết được khi bấm dừng.
+    this._probes = new Set();
     // Thư mục dữ liệu của ALICE ĐANG MỞ — auth/session của mỗi Alice nằm riêng.
     // Mặc định là data dir cũ để test chạy không cần set; main gọi setBaseDir
     // mỗi khi đổi Alice.
@@ -87,6 +106,8 @@ class OpencodeEngine {
    * @returns {Promise<{sessionId, text, tokens, model, events}>}
    */
   run({ message, sessionId = null, model, cwd, onEvent = null, signal = null }) {
+    // Đã bấm dừng trước khi kịp spawn — không mở thêm tiến trình nào nữa.
+    if (this._cancelled) return Promise.reject(new CancelledError());
     if (!this.available) {
       return Promise.reject(new Error(
         'Không tìm thấy binary opencode. Bản portable phải có runtime/opencode/opencode.exe (D-0053 mục 3).'
@@ -209,6 +230,12 @@ class OpencodeEngine {
         clearTimeout(idleTimer);
         this._child = null;
         const text = joinParts(textParts);
+        // Bị giết vì người dùng bấm dừng: báo đúng là "đã dừng", không phải "model
+        // hỏng" — nếu không thì tầng trên tưởng model này tệ và thử model kế tiếp.
+        if (this._cancelled) {
+          reject(new CancelledError());
+          return;
+        }
         if (timedOut && !text) {
           reject(new Error(`Model ${model} im lặng quá ${Math.round(idleMs / 1000)}s — bỏ qua.`));
           return;
@@ -235,6 +262,10 @@ class OpencodeEngine {
    * đổi model là kiểu lỗi rất khó truy về sau.
    */
   async runWithFallback(opts) {
+    // Cờ dừng thuộc về MỘT lượt. Không reset ở đây thì lượt sau kế thừa lệnh dừng
+    // của lượt trước và chết ngay khi vừa bắt đầu.
+    this._cancelled = false;
+
     let chain;
     if (opts.model) {
       // Model người dùng CHỌN phải còn tồn tại thật (danh sách realtime). Zen đổi
@@ -260,10 +291,15 @@ class OpencodeEngine {
     const attempts = [];
     for (const model of chain) {
       if (model.startsWith('__skipped:')) continue;
+      if (this._cancelled) throw new CancelledError();
       try {
         const out = await this.run({ ...opts, model });
         return { ...out, attempts };
       } catch (err) {
+        // Người dùng dừng thì DỪNG HẲN, không xoay tiếp. Đây chính là chỗ mà lệnh
+        // dừng từng bị nuốt: chuỗi model free có 6–7 model, mỗi lần bấm dừng chỉ
+        // giết được một model rồi nó chạy model sau.
+        if (err.cancelled) throw err;
         attempts.push({ model, error: err.message });
         // Session đã tạo bởi model hỏng vẫn dùng lại được — lịch sử nằm ở
         // session, không ở model.
@@ -273,30 +309,50 @@ class OpencodeEngine {
     throw new Error(`Mọi model đều hỏng. ${detail}`);
   }
 
+  /**
+   * Dừng lượt đang chạy.
+   *
+   * Đặt cờ TRƯỚC khi giết: `close` của tiến trình con bắn ra ngay, và nó cần đọc
+   * được cờ để biết mình chết vì bị dừng chứ không phải vì model hỏng.
+   *
+   * Giết cả tiến trình `opencode models` — lượt đầu của chế độ "tự xoay model" nằm
+   * gần như trọn vẹn ở bước duyệt danh sách model, và trước đây bấm dừng trong lúc
+   * đó không đụng được vào gì cả.
+   */
   cancel() {
+    this._cancelled = true;
+    let killed = false;
     if (this._child) {
       this._child.kill();
       this._child = null;
-      return true;
+      killed = true;
     }
-    return false;
+    for (const c of this._probes) {
+      try { c.kill(); killed = true; } catch { /* đã chết */ }
+    }
+    this._probes.clear();
+    return killed;
   }
 
   _exec(args, { timeout = 30000 } = {}) {
+    if (this._cancelled) return Promise.reject(new CancelledError());
     return new Promise((resolve, reject) => {
       const child = spawn(this.binPath, args, {
         windowsHide: true,
         env: { ...process.env, ...portableEnv(this.baseDir) },
         stdio: ['ignore', 'pipe', 'pipe'], // cùng lý do như trong run()
       });
+      this._probes.add(child);
       let stdout = '';
       let stderr = '';
       const timer = setTimeout(() => { child.kill(); reject(new Error(`Quá ${timeout}ms`)); }, timeout);
       child.stdout.on('data', (b) => { stdout += b.toString('utf8'); });
       child.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
-      child.on('error', (e) => { clearTimeout(timer); reject(e); });
+      child.on('error', (e) => { clearTimeout(timer); this._probes.delete(child); reject(e); });
       child.on('close', (code) => {
         clearTimeout(timer);
+        this._probes.delete(child);
+        if (this._cancelled) { reject(new CancelledError()); return; }
         if (code === 0) resolve({ stdout, stderr });
         else reject(new Error(`opencode ${args[0]} thoát mã ${code}: ${stderr.slice(0, 300)}`));
       });
@@ -308,4 +364,4 @@ function joinParts(map) {
   return Array.from(map.values()).join('').trim();
 }
 
-module.exports = { OpencodeEngine, SESSION_RE };
+module.exports = { OpencodeEngine, SESSION_RE, CancelledError };

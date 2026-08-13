@@ -98,3 +98,61 @@ test('migrateLegacy: máy mới tinh (không có alice.db) thì không tạo gì
   assert.equal(fs.existsSync(paths.registryPath), false, 'không được ghi registry khi chưa có gì');
   fs.rmSync(paths._root, { recursive: true, force: true });
 });
+
+// ── thư mục do người dùng chọn ────────────────────────────────────────────────
+
+test('create: chọn thư mục riêng thì Alice sống ở đó, trong thư mục con mang tên nó', () => {
+  const paths = tmpPaths();
+  const home = path.join(paths._root, 'Work', 'du-an');
+  fs.mkdirSync(home, { recursive: true });
+
+  const { alice } = registry.create({ name: 'Alice K-OS', key: 'sk-1', dir: home }, paths);
+
+  // Không đổ thẳng vào thư mục người dùng chỉ — rải file vào một thư mục đang có
+  // việc khác là cách nhanh nhất để họ mất niềm tin.
+  assert.equal(alice.dir, path.join(home, 'Alice-K-OS'));
+  assert.ok(fs.existsSync(alice.dir));
+  assert.ok(fs.existsSync(path.join(alice.dir, 'brain')));
+  assert.equal(registry.dirOf(alice, paths), alice.dir);
+
+  const authFile = path.join(alice.dir, 'opencode', 'data', 'opencode', 'auth.json');
+  assert.equal(JSON.parse(fs.readFileSync(authFile, 'utf8')).opencode.key, 'sk-1');
+
+  // Thư mục mặc định KHÔNG được tạo song song.
+  assert.equal(fs.existsSync(registry.aliceDirOf(registry.resolve(paths), alice.id)), false);
+});
+
+test('slug: tên tiếng Việt có dấu thành tên thư mục Windows nhận được', () => {
+  assert.equal(registry.slug('Alice Phượng'), 'Alice-Phuong');
+  assert.equal(registry.slug('Alice / GoDine?'), 'Alice-GoDine');
+  assert.equal(registry.slug('Đặng'), 'Dang');
+  assert.equal(registry.slug('***'), '');
+});
+
+test('remove: KHÔNG xoá thư mục do người dùng chọn — chỉ gỡ khỏi danh sách', () => {
+  const paths = tmpPaths();
+  const home = path.join(paths._root, 'Work');
+  fs.mkdirSync(home, { recursive: true });
+  const { alice } = registry.create({ name: 'Alice K-OS', key: 'sk-1', dir: home }, paths);
+  // Một file của NGƯỜI DÙNG nằm cạnh đó — xoá nhầm ở đây là mất dữ liệu thật.
+  fs.writeFileSync(path.join(home, 'bao-cao.txt'), 'quan trọng');
+
+  const { state, removed, keptDir } = registry.remove(alice.id, paths);
+  assert.equal(removed, true);
+  assert.equal(state.alices.length, 0);
+  assert.equal(keptDir, alice.dir, 'phải báo lại thư mục còn giữ để UI nói cho người dùng');
+  assert.ok(fs.existsSync(alice.dir), 'thư mục người dùng chọn không được tự xoá');
+  assert.ok(fs.existsSync(path.join(home, 'bao-cao.txt')));
+});
+
+test('remove: thư mục do CHÍNH APP tạo thì xoá hẳn, không báo giữ lại', () => {
+  const paths = tmpPaths();
+  const { alice } = registry.create({ name: 'Alice', key: 'sk-1' }, paths);
+  const dir = registry.aliceDirOf(registry.resolve(paths), alice.id);
+  assert.ok(fs.existsSync(dir));
+
+  const { removed, keptDir } = registry.remove(alice.id, paths);
+  assert.equal(removed, true);
+  assert.equal(keptDir, null);
+  assert.equal(fs.existsSync(dir), false);
+});
