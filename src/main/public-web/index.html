@@ -2,201 +2,366 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  `maximum-scale=1, user-scalable=no`: iOS Safari phóng to trang mỗi lần chạm vào ô
+  nhập nếu font < 16px, rồi KHÔNG thu lại — trang lệch hẳn và người dùng phải tự
+  pinch về. Khoá zoom là một nửa; nửa còn lại là mọi ô nhập để đúng 16px (xem
+  `input, textarea` bên dưới). Thiếu một trong hai là vẫn nhảy.
+  `viewport-fit=cover`: iPhone tai thỏ — cần để `env(safe-area-inset-*)` có giá trị.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a1022">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="color-scheme" content="dark">
 <title>Chat với Alice</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: linear-gradient(180deg, #10172e 0%, #0a1022 60%, #070b18 100%);
-    color: #e9effa; height:100vh; display:flex; flex-direction:column;
+
+  /* `display` do class đặt THẮNG `display:none` mà trình duyệt gán cho [hidden] —
+     nên một khối `display:flex` vẫn hiện nguyên dù đang mang thuộc tính hidden.
+     Đúng lỗi đã dính: mode "ai có link cũng vào được" mà điện thoại vẫn thấy màn
+     đăng nhập, vì `.login` đặt `display:flex`. Luật này phải nằm TRƯỚC mọi class. */
+  [hidden] { display: none !important; }
+
+  :root {
+    --bg-1:#10172e; --bg-2:#0a1022; --bg-3:#070b18;
+    --surface:#141b2d; --border:#233048; --border-2:#2f3e5c;
+    --text:#e9effa; --muted:#8496b8; --primary:#9b6bff;
+    --primary-soft:#c9afff; --primary-deep:#7a45e8; --on-primary:#1e0a45;
+    --danger:#ff8a80;
+    /* Chiều cao thật của khung nhìn. `100vh` trên mobile tính CẢ thanh địa chỉ,
+       nên ô nhập bị đẩy xuống dưới mép màn hình. `dvh` mới là phần nhìn thấy. */
+    --vh: 100vh;
   }
+  @supports (height: 100dvh) { :root { --vh: 100dvh; } }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+    background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-2) 60%, var(--bg-3) 100%);
+    background-attachment: fixed;
+    color: var(--text);
+    height: var(--vh);
+    display: flex; flex-direction: column;
+    overscroll-behavior: none;           /* kéo quá đà không làm trang nảy */
+  }
+
+  /* ── đầu trang ─────────────────────────────────────────────────────────── */
   .head {
-    padding:14px 18px; border-bottom:1px solid #233048;
-    display:flex; align-items:center; gap:12px; background:rgba(16,23,46,.9);
+    flex-shrink: 0;
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+    padding-left: calc(16px + env(safe-area-inset-left));
+    padding-right: calc(16px + env(safe-area-inset-right));
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+    background: rgba(16,23,46,.92);
+    backdrop-filter: blur(14px);
   }
   .ava {
-    width:40px; height:40px; border-radius:50%; flex-shrink:0;
-    background:linear-gradient(160deg, #c9afff, #7ec8ff);
-    display:flex; align-items:center; justify-content:center;
-    font-weight:900; color:#1e0a45; font-size:16px;
+    width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+    background: linear-gradient(160deg, var(--primary-soft), #7ec8ff);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; color: var(--on-primary); font-size: 15px;
   }
-  .who .name { font-weight:800; font-size:16px; }
-  .who .sub { font-size:11.5px; color:#6b7a99; }
+  .ava img { width: 100%; height: 100%; object-fit: cover; }
+  .who { min-width: 0; flex: 1; }
+  .who .name {
+    font-weight: 800; font-size: 16px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .who .sub {
+    font-size: 11.5px; color: var(--muted); margin-top: 1px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ── dòng tin ──────────────────────────────────────────────────────────── */
   .feed {
-    flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px;
+    flex: 1; min-height: 0; overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px;
+    padding-left: calc(16px + env(safe-area-inset-left));
+    padding-right: calc(16px + env(safe-area-inset-right));
+    display: flex; flex-direction: column; gap: 10px;
   }
-  .row { display:flex; gap:10px; align-items:flex-end; }
-  .row.mine { justify-content:flex-end; }
+  .row { display: flex; }
+  .row.mine { justify-content: flex-end; }
   .bubble {
-    max-width:78%; padding:10px 14px; border-radius:14px 14px 14px 4px;
-    background:#141b2d; border:1px solid #233048; font-size:14px; line-height:1.55;
-    white-space:pre-wrap; overflow-wrap:anywhere;
+    max-width: 85%;
+    padding: 10px 14px; border-radius: 16px 16px 16px 5px;
+    background: var(--surface); border: 1px solid var(--border);
+    font-size: 15px; line-height: 1.55;
+    white-space: pre-wrap; overflow-wrap: anywhere;
   }
-  .row.mine .bubble { border-radius:14px 14px 4px 14px; background:linear-gradient(160deg,#c9afff,#7a45e8); color:#1e0a45; }
+  .row.mine .bubble {
+    border-radius: 16px 16px 5px 16px; border: none;
+    background: linear-gradient(160deg, var(--primary-soft), var(--primary-deep));
+    color: var(--on-primary); font-weight: 600;
+  }
+  .bubble.err { border-color: #5c2b2e; background: #2a1215; color: var(--danger); }
+  .typing { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+
+  /* ── ô nhập ────────────────────────────────────────────────────────────── */
   .compose {
-    padding:12px 16px 14px; border-top:1px solid #233048;
-    display:flex; gap:10px; align-items:flex-end; background:rgba(16,23,46,.9);
+    flex-shrink: 0;
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    border-top: 1px solid var(--border);
+    display: flex; gap: 9px; align-items: flex-end;
+    background: rgba(16,23,46,.95);
+    backdrop-filter: blur(14px);
   }
+  .compose textarea {
+    flex: 1; min-width: 0; resize: none;
+    max-height: 120px; line-height: 1.4;
+    padding: 11px 15px; border-radius: 20px;
+    border: 1px solid var(--border); background: #0d1424; color: var(--text);
+    font-family: inherit; outline: none;
+  }
+  .compose textarea:focus { border-color: var(--primary); }
+
+  /* ── đăng nhập / mã truy cập ───────────────────────────────────────────── */
+  .gate {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px calc(20px + env(safe-area-inset-left)) 24px calc(20px + env(safe-area-inset-right));
+  }
+  .gate .card {
+    width: 100%; max-width: 360px; padding: 22px;
+    border-radius: 18px; background: var(--surface); border: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .gate h2 { font-size: 19px; }
+  .gate .lead { font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: -4px; }
+  .gate .err { color: var(--danger); font-size: 12.5px; min-height: 16px; line-height: 1.4; }
+  .code-input { letter-spacing: .38em; text-align: center; font-weight: 700; }
+
+  /* 16px là ngưỡng iOS: nhỏ hơn là Safari tự phóng trang lúc chạm vào ô nhập. */
+  input, textarea, button, select { font-size: 16px; font-family: inherit; }
   input {
-    flex:1; padding:11px 14px; border-radius:20px; border:1px solid #233048;
-    background:#0d1424; color:#e9effa; font-size:14px; outline:none;
+    width: 100%; padding: 12px 14px; border-radius: 12px;
+    border: 1px solid var(--border); background: #0d1424; color: var(--text);
+    outline: none;
   }
-  input:focus { border-color:#9b6bff; }
+  input:focus { border-color: var(--primary); }
   button {
-    padding:11px 18px; border:none; border-radius:20px; cursor:pointer;
-    background:linear-gradient(160deg,#c9afff,#7a45e8); color:#1e0a45;
-    font-weight:800; font-size:14px;
+    padding: 12px 18px; border: none; border-radius: 20px; cursor: pointer;
+    background: linear-gradient(160deg, var(--primary-soft), var(--primary-deep));
+    color: var(--on-primary); font-weight: 800;
+    touch-action: manipulation;          /* chạm hai lần không phóng to trang */
+    -webkit-tap-highlight-color: transparent;
   }
-  button:hover { transform:translateY(-1px); }
-  .login {
-    flex:1; display:flex; align-items:center; justify-content:center; padding:24px;
+  button:disabled { opacity: .5; cursor: default; }
+  .send { width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%; padding: 0; font-size: 17px; }
+
+  /* Màn hình rộng: bó lại giữa cho khỏi trải dài cả màn desktop. */
+  @media (min-width: 720px) {
+    .head, .feed, .compose { padding-left: max(18px, calc(50% - 420px)); padding-right: max(18px, calc(50% - 420px)); }
+    .bubble { max-width: 74%; }
   }
-  .login .card {
-    width:100%; max-width:340px; padding:22px; border-radius:16px;
-    background:#141b2d; border:1px solid #233048;
-    display:flex; flex-direction:column; gap:12px;
-  }
-  .login .card h2 { font-size:18px; margin-bottom:4px; }
-  .login .err { color:#ff8a80; font-size:12.5px; min-height:16px; }
-  .typing { color:#6b7a99; font-size:12px; padding:2px 0; }
 </style>
 </head>
 <body>
   <div class="head">
-    <div class="ava">★</div>
+    <div class="ava" id="ava">★</div>
     <div class="who">
       <div class="name" id="alice-name">Alice</div>
       <div class="sub" id="alice-sub">đang kết nối…</div>
     </div>
   </div>
 
-  <div id="login-view" class="login" hidden>
+  <div id="gate-view" class="gate" hidden>
     <div class="card">
-      <h2>Đăng nhập</h2>
-      <input id="lg-user" type="text" placeholder="Tên đăng nhập" autocomplete="username">
+      <h2 id="gate-title">Đăng nhập</h2>
+      <div class="lead" id="gate-lead"></div>
+      <input id="lg-user" type="text" placeholder="Tên đăng nhập" autocomplete="username" autocapitalize="none" autocorrect="off">
       <input id="lg-pass" type="password" placeholder="Mật khẩu" autocomplete="current-password">
-      <div class="err" id="lg-err"></div>
-      <button id="lg-btn">Vào chat</button>
+      <input id="lg-code" class="code-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="12" placeholder="Mã truy cập" autocomplete="one-time-code" hidden>
+      <div class="err" id="gate-err"></div>
+      <button id="gate-btn">Vào chat</button>
     </div>
   </div>
 
   <div id="chat-view" class="feed" hidden></div>
 
   <div id="compose" class="compose" hidden>
-    <input id="msg" placeholder="Nhắn cho Alice…" autocomplete="off">
-    <button id="send">Gửi</button>
+    <textarea id="msg" rows="1" placeholder="Nhắn cho Alice…" enterkeyhint="send" autocomplete="off" autocapitalize="sentences"></textarea>
+    <button class="send" id="send" title="Gửi">➤</button>
   </div>
 
 <script>
-const MODE = '__MODE__'; // 'anyone' | 'account' — server chèn lúc phục vụ
+/* Mode do máy chủ chèn lúc phục vụ:
+     anyone  — ai có link/QR đều chat được, không hỏi gì;
+     code    — hỏi một mã truy cập dùng chung;
+     account — hỏi username + password.                                        */
+const MODE = '__MODE__';
 const API = '';
 let token = localStorage.getItem('alice-token') || null;
 
 const $ = (id) => document.getElementById(id);
 
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 async function init() {
   try {
     const r = await fetch(API + '/v1/who');
     const d = await r.json();
-    $('alice-name').textContent = d.name;
-    $('alice-sub').textContent = MODE === 'account' ? 'cần đăng nhập để chat' : 'chào bạn — cứ hỏi tự nhiên';
-  } catch { /* máy chủ vẫn hoạt động, chỉ chưa lấy được tên */ }
+    $('alice-name').textContent = d.name || 'Alice';
+    document.title = 'Chat với ' + ($('alice-name').textContent);
+    if (d.avatar) $('ava').innerHTML = '<img alt="">', $('ava').firstChild.src = d.avatar;
+  } catch { /* máy chủ vẫn chạy, chỉ chưa lấy được tên */ }
 
-  if (MODE === 'anyone') {
-    showChat();
-  } else {
-    // Account mode: nếu đã có session token hợp lệ thì vào thẳng.
-    if (token) {
+  if (MODE === 'anyone') { showChat(); return; }
+
+  // Đã có phiên còn sống thì vào thẳng, không hỏi lại.
+  if (token) {
+    try {
       const ok = await fetch(API + '/v1/check', { headers: { Authorization: 'Bearer ' + token } });
       if (ok.ok) { showChat(); return; }
-    }
-    $('login-view').hidden = false;
-    $('lg-btn').onclick = login;
-    $('lg-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
-    $('lg-user').focus();
+    } catch { /* mất mạng — cứ hiện màn hỏi */ }
+    token = null;
+    localStorage.removeItem('alice-token');
   }
+  showGate();
 }
 
-async function login() {
-  $('lg-err').textContent = '';
+function showGate() {
+  const byCode = MODE === 'code';
+  $('alice-sub').textContent = byCode ? 'cần mã truy cập' : 'cần đăng nhập';
+  $('gate-title').textContent = byCode ? 'Nhập mã truy cập' : 'Đăng nhập';
+  $('gate-lead').textContent = byCode
+    ? 'Người chia sẻ Alice này cho bạn sẽ đưa bạn một mã.'
+    : 'Dùng tên đăng nhập và mật khẩu mà chủ Alice đã tạo cho bạn.';
+  $('lg-user').hidden = byCode;
+  $('lg-pass').hidden = byCode;
+  $('lg-code').hidden = !byCode;
+  $('gate-view').hidden = false;
+
+  $('gate-btn').onclick = enter;
+  for (const el of ['lg-user', 'lg-pass', 'lg-code']) {
+    $(el).addEventListener('keydown', (e) => { if (e.key === 'Enter') enter(); });
+  }
+  // KHÔNG tự focus trên điện thoại: bàn phím bật lên che mất nửa màn hình ngay
+  // khi vừa mở, người dùng chưa kịp đọc là mình đang ở đâu.
+  if (!('ontouchstart' in window)) $(byCode ? 'lg-code' : 'lg-user').focus();
+}
+
+async function enter() {
+  $('gate-err').textContent = '';
+  $('gate-btn').disabled = true;
   try {
+    const body = MODE === 'code'
+      ? { code: $('lg-code').value.trim() }
+      : { username: $('lg-user').value.trim(), password: $('lg-pass').value };
     const r = await fetch(API + '/v1/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: $('lg-user').value, password: $('lg-pass').value }),
+      body: JSON.stringify(body),
     });
-    const d = await r.json();
-    if (!r.ok) { $('lg-err').textContent = d.error || 'Sai tên hoặc mật khẩu.'; return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { $('gate-err').textContent = d.error || 'Không vào được.'; return; }
     token = d.token;
     localStorage.setItem('alice-token', token);
+    $('gate-view').hidden = true;
     showChat();
   } catch {
-    $('lg-err').textContent = 'Không kết nối được máy chủ.';
+    $('gate-err').textContent = 'Không kết nối được máy chủ.';
+  } finally {
+    $('gate-btn').disabled = false;
   }
 }
 
 function showChat() {
-  $('login-view').hidden = true;
+  $('gate-view').hidden = true;
   $('chat-view').hidden = false;
   $('compose').hidden = false;
-  $('alice-sub').textContent = 'Alice luôn nhớ cuộc trò chuyện này';
+  $('alice-sub').textContent = 'Alice nhớ cuộc trò chuyện này';
   addMsg('alice', 'Chào bạn, mình có thể giúp gì?');
-  $('msg').focus();
 }
 
-function addMsg(who, text) {
+function addMsg(who, text, isErr) {
   const row = document.createElement('div');
   row.className = 'row' + (who === 'me' ? ' mine' : '');
   const b = document.createElement('div');
-  b.className = 'bubble';
-  b.textContent = text;
-  row.appendChild(b);
+  b.className = 'bubble' + (isErr ? ' err' : '');
+  b.textContent = text;                      // textContent: câu trả lời của model
+  row.appendChild(b);                        // là nội dung không đáng tin
   $('chat-view').appendChild(row);
+  scrollDown();
+  return b;
+}
+
+function scrollDown() {
   $('chat-view').scrollTop = $('chat-view').scrollHeight;
 }
 
+const msg = $('msg');
+function autoGrow() {
+  msg.style.height = 'auto';
+  msg.style.height = Math.min(msg.scrollHeight, 120) + 'px';
+}
+msg.addEventListener('input', autoGrow);
+
 let busy = false;
 async function send() {
-  const text = $('msg').value.trim();
+  const text = msg.value.trim();
   if (!text || busy) return;
-  $('msg').value = '';
+  msg.value = '';
+  autoGrow();
   addMsg('me', text);
   busy = true;
+  $('send').disabled = true;
+
   const typing = document.createElement('div');
   typing.className = 'typing';
   typing.textContent = 'Alice đang trả lời…';
   $('chat-view').appendChild(typing);
-  $('chat-view').scrollTop = $('chat-view').scrollHeight;
+  scrollDown();
+
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = 'Bearer ' + token;
     const r = await fetch(API + '/v1/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: token ? 'Bearer ' + token : '' },
-      body: JSON.stringify({ message: text }),
+      method: 'POST', headers, body: JSON.stringify({ message: text }),
     });
-    const d = await r.json();
+    const d = await r.json().catch(() => ({}));
     typing.remove();
     if (!r.ok) {
-      addMsg('alice', 'Có lỗi: ' + (d.error || 'không rõ'));
-      if (r.status === 401) { token = null; localStorage.removeItem('alice-token'); }
+      addMsg('alice', d.error || 'Có lỗi không rõ.', true);
+      if (r.status === 401) {
+        token = null;
+        localStorage.removeItem('alice-token');
+        $('chat-view').hidden = true;
+        $('compose').hidden = true;
+        showGate();
+      }
       return;
     }
     addMsg('alice', d.text);
   } catch {
     typing.remove();
-    addMsg('alice', 'Không kết nối được máy chủ.');
+    addMsg('alice', 'Không kết nối được máy chủ.', true);
   } finally {
     busy = false;
-    $('msg').focus();
+    $('send').disabled = false;
   }
 }
 
 $('send').onclick = send;
-$('msg').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+msg.addEventListener('keydown', (e) => {
+  // Máy tính: Enter gửi, Shift+Enter xuống dòng. Điện thoại: nút "gửi" trên bàn
+  // phím cũng bắn Enter, nên cùng một luật.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+/* Bàn phím điện thoại mở ra làm khung nhìn thấp đi mà `100dvh` không đổi ngay —
+   tin cuối bị bàn phím che. Bám theo visualViewport rồi cuộn lại xuống đáy. */
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    document.documentElement.style.setProperty('--vh', window.visualViewport.height + 'px');
+    scrollDown();
+  });
+}
 
 init();
 </script>

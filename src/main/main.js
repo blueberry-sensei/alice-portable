@@ -17,6 +17,7 @@ const { BrainSidecar } = require('./brain/sidecar');
 const { Scheduler } = require('./scheduler');
 const { Updater } = require('./updater');
 const { PublicServer } = require('./public-server');
+const { Tunnel } = require('./tunnel');
 const registryModule = require('./registry');
 
 let win = null;
@@ -32,6 +33,9 @@ let registry = { active: null, alices: [] };
 // Alice đang được public làm máy chủ: id → PublicServer (chạy độc lập với
 // Alice đang mở trên màn hình).
 const publicServers = new Map();
+// Alice đang được chia sẻ ra INTERNET: id → Tunnel (cloudflared). Tách khỏi
+// publicServers vì máy chủ LAN sống được mà không cần tunnel.
+const tunnels = new Map();
 
 // Cửa sổ đóng (bấm X) chỉ ẨN app — chat app phải sống tiếp để nhận lịch hẹn và
 // không phải dựng lại brain mỗi lần. `isQuitting` đánh dấu lượt thoát THẬT
@@ -316,6 +320,11 @@ ipcMain.handle('alice:alice:remove', async (_e, id) => {
     pub.stop();
     publicServers.delete(id);
   }
+  const tun = tunnels.get(id);
+  if (tun) {
+    tun.stop();
+    tunnels.delete(id);
+  }
   const { state, removed } = registryModule.remove(id);
   registry = state;
   if (!removed) return { error: 'Không tìm thấy Alice.' };
@@ -352,10 +361,26 @@ function publicServerFor(id) {
       engine,
       brainMcp: bs.available ? bs.mcpConfig() : null,
       log,
+      // Trang chat của khách hiện đúng ảnh của Alice này, không phải ngôi sao chung.
+      avatar: () => avatar.current(base),
     });
     publicServers.set(id, pub);
   }
   return pub;
+}
+
+/** Tunnel của Alice (tạo mới nếu chưa có — chưa mở). */
+function tunnelFor(id) {
+  let t = tunnels.get(id);
+  if (!t) {
+    t = new Tunnel({
+      resourcesDir: config.RESOURCES_DIR,
+      toolsDir: path.join(config.DATA_DIR, 'tools'),
+      log,
+    });
+    tunnels.set(id, t);
+  }
+  return t;
 }
 
 ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
@@ -374,6 +399,10 @@ ipcMain.handle('alice:public:toggle', async (_e, id, { enabled, port }) => {
       pub.saveConfig({ ...newCfg, enabled: true, port: p });
     } else {
       pub.stop();
+      // Tắt máy chủ thì tunnel trỏ vào hư không — đóng luôn cho khỏi treo một
+      // link công khai không dẫn tới đâu.
+      const t = tunnels.get(id);
+      if (t) t.stop();
       const cfg = pub.config();
       pub.saveConfig({ ...cfg, enabled: false });
     }
@@ -387,10 +416,31 @@ ipcMain.handle('alice:public:set-mode', async (_e, id, mode) => {
   await bootPromise;
   try {
     const pub = publicServerFor(id);
+    const next = ['anyone', 'code', 'account'].includes(mode) ? mode : 'anyone';
+
+    // Đang mở ra Internet mà hạ xuống `anyone` = phơi Alice cho cả thế giới.
+    const t = tunnels.get(id);
+    if (next === 'anyone' && t && t.running) {
+      return { error: 'Đang chia sẻ ra Internet — chế độ "ai có link cũng vào" chỉ an toàn trong mạng nội bộ. Tắt chia sẻ Internet trước, hoặc chọn mã truy cập / tài khoản.' };
+    }
+
     const cfg = pub.config();
-    cfg.mode = mode === 'account' ? 'account' : 'anyone';
+    cfg.mode = next;
+    if (next === 'code' && !cfg.code) cfg.code = require('./public-server').newAccessCode();
     pub.saveConfig(cfg);
+    log.info(`public mode: ${id} → ${next}`);
     return { ok: true };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:public:code:rotate', async (_e, id) => {
+  await bootPromise;
+  try {
+    const code = publicServerFor(id).rotateCode();
+    log.info(`public access code rotated: ${id}`);
+    return { code };
   } catch (err) {
     return { error: String(err.message || err) };
   }
@@ -434,16 +484,74 @@ ipcMain.handle('alice:public:info', async (_e, id) => {
     const pub = publicServerFor(id);
     const cfg = pub.config();
     const port = pub.port || cfg.port;
+    const tunnel = tunnelFor(id).status();
+    const lanUrl = shareableUrl(port);
     return {
       enabled: pub.running,
       mode: cfg.mode,
       port,
+      // Mã chỉ có nghĩa ở mode `code` — không đẩy ra UI ở mode khác.
+      code: cfg.mode === 'code' ? cfg.code : null,
       accounts: cfg.accounts.map((a) => ({ username: a.username })),
-      shareUrl: shareableUrl(port),
+      // Link để chia sẻ: có tunnel thì đó mới là link người ngoài mạng vào được.
+      shareUrl: tunnel.url || lanUrl,
+      lanUrl,
       localUrl: `http://127.0.0.1:${port}`,
       lanUrls: shareableIps().map((ip) => `http://${ip}:${port}`),
+      tunnel,
     };
   } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+// ── chia sẻ ra Internet (cloudflared) ──────────────────────────────────────
+
+ipcMain.handle('alice:tunnel:status', async (_e, id) => {
+  await bootPromise;
+  try {
+    return tunnelFor(id).status();
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:tunnel:download', async (event, id) => {
+  await bootPromise;
+  try {
+    const t = tunnelFor(id);
+    const p = await t.download((pct) => {
+      event.sender.send('alice:tunnel-progress', { id, pct });
+    });
+    return { ok: true, binary: p };
+  } catch (err) {
+    log.error(`tunnel download failed: ${err.message}`);
+    return { error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('alice:tunnel:toggle', async (_e, id, enabled) => {
+  await bootPromise;
+  try {
+    const t = tunnelFor(id);
+    if (!enabled) {
+      t.stop();
+      return { ok: true, tunnel: t.status() };
+    }
+    const pub = publicServerFor(id);
+    if (!pub.running) {
+      return { error: 'Bật máy chủ trước đã — tunnel chỉ chuyển tiếp vào một máy chủ đang chạy.' };
+    }
+    // Luật cứng: link tunnel là link CÔNG KHAI trên Internet. Mode `anyone` cộng
+    // với tunnel = ai dò trúng URL cũng chat được và đốt API key của chủ máy.
+    if (pub.config().mode === 'anyone') {
+      return { error: 'Ra Internet thì phải có cửa: chọn "mã truy cập" hoặc "tài khoản" trước khi chia sẻ.' };
+    }
+    const { url } = await t.start(pub.port);
+    log.info(`tunnel for ${id}: ${url}`);
+    return { ok: true, tunnel: t.status() };
+  } catch (err) {
+    log.error(`tunnel toggle failed: ${err.message}`);
     return { error: String(err.message || err) };
   }
 });
@@ -639,6 +747,8 @@ ipcMain.handle('alice:sched:remove', async (_e, id) => {
 ipcMain.handle('alice:shutdown', async () => {
   log.info('shutdown requested from UI');
   isQuitting = true;
+  for (const t of tunnels.values()) t.stop();
+  tunnels.clear();
   for (const pub of publicServers.values()) pub.stop();
   publicServers.clear();
   if (scheduler) scheduler.stop();
@@ -736,6 +846,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('window-all-closed', () => {
     // Cửa sổ chỉ bị ẩn chứ không đóng, nên sự kiện này chỉ tới khi thoát THẬT.
+    for (const t of tunnels.values()) t.stop();
+    tunnels.clear();
     for (const pub of publicServers.values()) pub.stop();
     publicServers.clear();
     if (scheduler) scheduler.stop();

@@ -118,6 +118,33 @@ Một app Alice có thể chứa **nhiều Alice** — ví dụ *Alice GoDine* c
 Alice nhớ hết những gì đã nói, kể cả sau khi tắt app. Khi cuộc trò chuyện dài quá,
 Alice tự tóm tắt phần cũ và nhớ tiếp — bạn không phải làm gì.
 
+## Chia sẻ Alice cho người khác dùng
+
+Ở màn hình danh sách Alice, bấm **Public Alice…** dưới một Alice. Bật máy chủ rồi
+đưa **link** hoặc **mã QR** cho người khác — họ mở ra là có ngay một trang chat.
+
+**Ai được vào chat** — ba mức, chọn đúng mức bạn cần:
+
+| Chế độ | Ai vào được | Nên dùng khi |
+|---|---|---|
+| Ai có link hoặc mã QR | bất kỳ ai mở được link | trong nhà / cùng wifi, người quen |
+| Hỏi một mã truy cập | ai có mã 8 số bạn phát | cả phòng, cả lớp — một mã dùng chung |
+| Mỗi người một tài khoản | ai có username + password bạn tạo | cần biết ai đã nói gì với Alice |
+
+**Vào được từ đâu** — mặc định chỉ máy **cùng wifi** vào được. Muốn người ở xa vào
+được thì bật **Chia sẻ Internet**: Alice mở một đường https qua Cloudflare, máy bạn
+**không phải mở cổng nào trên router**. Lần đầu app xin tải `cloudflared` (~35 MB),
+tải một lần rồi thôi.
+
+> ⚠️ Chia sẻ ra Internet **bắt buộc** phải có mã truy cập hoặc tài khoản — app không
+> cho bật khi đang ở chế độ "ai có link cũng vào". Link Internet là link công khai;
+> không có cửa thì ai dò trúng cũng chat được và **tiêu API key của bạn**.
+
+Vài điều nên biết: máy bạn phải **đang bật và đang mở Alice** thì người khác mới vào
+được; Alice trả lời **một lượt một người**, ai tới sau xếp hàng chờ; và mọi người vào
+qua link đang nói chuyện trong **cùng một cuộc trò chuyện** — đừng chia sẻ Alice đang
+giữ chuyện riêng của bạn, hãy tạo một Alice riêng để public.
+
 ## Đổi ảnh Alice
 
 Bấm **⚙** → **Đổi ảnh…** → chọn ảnh trong máy. Nhận PNG, JPG, WEBP, GIF dưới 8 MB.

@@ -36,9 +36,16 @@ contextBridge.exposeInMainWorld('alice', {
   publicToggle: (id, data) => ipcRenderer.invoke('alice:public:toggle', id, data),
   publicInfo: (id) => ipcRenderer.invoke('alice:public:info', id),
   publicSetMode: (id, mode) => ipcRenderer.invoke('alice:public:set-mode', id, mode),
+  publicCodeRotate: (id) => ipcRenderer.invoke('alice:public:code:rotate', id),
   publicAccountAdd: (id, data) => ipcRenderer.invoke('alice:public:account:add', id, data),
   publicAccountRemove: (id, username) => ipcRenderer.invoke('alice:public:account:remove', id, username),
   clipboardWrite: (text) => ipcRenderer.invoke('alice:clipboard:write', text),
+
+  // Chia sẻ ra Internet qua cloudflared — không mở port nào trên router.
+  tunnelStatus: (id) => ipcRenderer.invoke('alice:tunnel:status', id),
+  tunnelDownload: (id) => ipcRenderer.invoke('alice:tunnel:download', id),
+  tunnelToggle: (id, enabled) => ipcRenderer.invoke('alice:tunnel:toggle', id, enabled),
+  onTunnelProgress: (cb) => ipcRenderer.on('alice:tunnel-progress', (_e, p) => cb(p)),
 
   // Chẩn đoán: nhật ký lỗi (tail) + mở thư mục logs + transcript gần đây kèm meta.
   debugLog: () => ipcRenderer.invoke('alice:debug:log'),
