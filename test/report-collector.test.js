@@ -245,13 +245,15 @@ test('serviceAccountToken: chữ ký JWT RS256 hợp lệ với public key', asy
   server.close();
 });
 
-test('chatMessages: thiếu file credentials thì lỗi rõ, không throw', async () => {
+test('chatMessages: thiếu file credentials thì lỗi rõ, KHÔNG lộ đường dẫn (đây là câu trả lời Alice đọc được)', async () => {
   const r = await chatMessages({
-    credentialsPath: 'Z:\\khong-ton-tai\\sa.json',
+    credentialsPath: 'Z:\\khong-ton-tai\\ai-do-ten-gi-do.json',
     space: 'AAAA',
     since: '2026-08-06',
   });
-  assert.match(r.error, /Không tìm thấy file credentials/);
+  assert.match(r.error, /Cài đặt/);
+  assert.doesNotMatch(r.error, /khong-ton-tai|ai-do-ten-gi-do/,
+    'lỗi này đi thẳng vào ngữ cảnh của Alice — không được lộ đường dẫn file credentials');
 });
 
 test('chatMessages: file lạ (thiếu cả refresh_token lẫn private_key) → lỗi rõ', async () => {

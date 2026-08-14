@@ -182,14 +182,19 @@ async function userAccessToken(cred) {
  *     khi project thuộc Workspace org VÀ app đã được thêm vào space.
  */
 async function chatMessages({ credentialsPath, space, since, chatBaseUrl = 'https://chat.googleapis.com', limit = 500 }) {
+  // Lỗi ở khối này KHÔNG được lộ `credentialsPath` — đây là đường dẫn tới file
+  // chứa refresh_token/private_key, và lỗi này đi thẳng vào câu trả lời của MCP
+  // tool, tức là vào NGỮ CẢNH của Alice. Alice không cần biết file này tồn tại
+  // hay nằm ở đâu để dùng được tool `chat_messages` — biết thêm chỉ tăng bề mặt
+  // rò rỉ nếu transcript của Alice bị lưu lại hay đọc lại sau này.
   if (!credentialsPath || !fs.existsSync(credentialsPath)) {
-    return { error: `Không tìm thấy file credentials Google Chat: ${credentialsPath}` };
+    return { error: 'Chưa có (hoặc không đọc được) thông tin xác thực Google Chat — kiểm tra lại mục "Báo cáo tuần" trong Cài đặt.' };
   }
   let cred;
   try {
     cred = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-  } catch (err) {
-    return { error: `Đọc file credentials lỗi: ${err.message}` };
+  } catch {
+    return { error: 'Thông tin xác thực Google Chat không đọc được (hỏng hoặc sai định dạng) — kiểm tra lại trong Cài đặt.' };
   }
 
   let tok;
