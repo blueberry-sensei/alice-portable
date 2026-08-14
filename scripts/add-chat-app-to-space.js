@@ -44,10 +44,21 @@ function parseArgs() {
   return out;
 }
 
+/**
+ * `cmd /c start "" <url>` VỠ URL có `&` (query string OAuth luôn có nhiều `&`):
+ * cmd.exe tự phân tích dòng lệnh và cắt tại `&` đầu tiên coi như lệnh kế tiếp —
+ * đo thật: browser chỉ nhận được `...?client_id=XXXX`, mất sạch phần sau
+ * (`response_type`, `scope`...) → Google báo "Required parameter is missing:
+ * response_type". `rundll32 url.dll,FileProtocolHandler` nhận URL làm một tham
+ * số duy nhất, không qua cmd.exe nên không bị cắt.
+ */
 function openBrowser(url) {
-  const cmd = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
-  execFile(cmd, args, () => {});
+  if (process.platform === 'win32') {
+    execFile('rundll32', ['url.dll,FileProtocolHandler', url], () => {});
+    return;
+  }
+  const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  execFile(cmd, [url], () => {});
 }
 
 function waitForCode() {
