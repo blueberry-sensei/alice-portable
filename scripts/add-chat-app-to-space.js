@@ -76,6 +76,20 @@ function waitForCode() {
       else if (code) resolve(code);
       else reject(new Error('Không nhận được code lẫn error từ redirect.'));
     });
+    // Không bắt lỗi ở đây là crash thô "Unhandled 'error' event" — đo thật: lần
+    // chạy trước bị ngắt giữa chừng (đóng terminal trước khi bấm xong OAuth) để
+    // lại server cũ còn giữ cổng, lần chạy sau EADDRINUSE ngay từ đầu.
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(new Error(
+          `Cổng ${REDIRECT_PORT} đang bị chiếm — có lẽ lần chạy script trước chưa `
+          + `thoát hẳn. Đóng cửa sổ terminal đó (hoặc tắt tiến trình đang giữ cổng `
+          + `này) rồi chạy lại.`
+        ));
+      } else {
+        reject(err);
+      }
+    });
     server.listen(REDIRECT_PORT, '127.0.0.1');
   });
 }
