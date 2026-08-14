@@ -24,6 +24,30 @@ const { PublicServer } = require('./public-server');
 const { Tunnel } = require('./tunnel');
 const { toolActivity } = require('./activity');
 const registryModule = require('./registry');
+const reportCfg = require('./report/config');
+const { PdfExporter } = require('./report/pdf');
+
+/**
+ * Entry MCP "report" cho một Alice — config của riêng nó (`<alice-home>/report.json`).
+ * Đường dẫn server là tuyệt đối tới mcp-server.js ngay trong main, chạy bằng chính
+ * electron-as-node (D-0053 mục 3: không npx, không node trần trên PATH).
+ */
+function reportMcpFor(base) {
+  return reportCfg.buildReportMcp({
+    execPath: process.execPath,
+    serverFile: path.join(__dirname, 'report', 'mcp-server.js'),
+    configFile: reportCfg.fileFor(base),
+  });
+}
+
+/** Cấu hình đã che bí mật để đẩy lên renderer — API key không bao giờ lộ. */
+function reportConfigForUI(base) {
+  const c = reportCfg.load(base);
+  return {
+    ...c,
+    planeApiKey: c.planeApiKey ? `••••••${c.planeApiKey.slice(-4)}` : '',
+  };
+}
 
 /**
  * Thư mục Chromium của app nằm CẠNH bản cài, không nằm ở %APPDATA% chung.
@@ -43,6 +67,7 @@ fs.mkdirSync(path.join(config.DATA_DIR, 'chromium'), { recursive: true });
 app.setPath('userData', path.join(config.DATA_DIR, 'chromium'));
 
 let win = null;
+let pdfExporter = null; // PDF sidecar — dựng lười khi Alice lần đầu in báo cáo
 let store = null;      // chat db của Alice ĐANG MỞ
 let memory = null;
 let engine = null;
@@ -286,8 +311,11 @@ async function activateAlice(id) {
   // nó vẫn đi làm việc ở một nơi hoàn toàn khác.
   // Model chỉ có nghĩa với opencode — `opencode.json` là file cấu hình của nó.
   // Alice chạy Claude Code thì để trống, không nhét tên model Claude vào đó.
+  // `reportMcp` đi kèm cho MỌI engine: opencode đọc trong opencode.json, Claude Code
+  // đọc trong .mcp.json (xem buildClaudeMcpJson).
   const workDir = provisionWorkspace(settings, {
     brainMcp,
+    reportMcp: reportMcpFor(base),
     dir: path.join(base, 'workspace'),
     model: alice.provider === 'claude' ? null : picked.model,
   });
@@ -499,6 +527,7 @@ ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
     // sau vẫn chạy model cũ dù ô chọn đã đổi.
     provisionWorkspace(settings, {
       brainMcp: brain && brain.available ? brain.mcpConfig() : null,
+      reportMcp: reportMcpFor(aliceDirFor(id)),
       dir: path.join(aliceDirFor(id), 'workspace'),
       model: alice.provider === 'claude' ? null : picked.model,
     });
@@ -653,18 +682,151 @@ ipcMain.handle('alice:brain:open', async (_e, id) => {
       dashboardSidecar = null;
     }
     if (!dashboardSidecar) {
-      dashboardSidecar = new BrainSidecar(
+      const bs = new BrainSidecar(
         { ...(settings.brain || {}), http: true, port: 8932 },
         { dataDir: path.join(base, 'brain') }
       );
-      await dashboardSidecar.start();
+      // Lần đầu mở brain của Alice này: python còn mới, Windows Defender quét cả
+      // cây thư viện nên startup lâu — cho 180s thay vì 30s mặc định (30s hết giờ
+      // bỏ cuộc trong khi tiến trình vẫn sống chính là gốc bug "bấm mãi không mở",
+      // đo thật 2026-08-14: sidecar lên sau ~5s lần thường, lâu hơn nhiều lần đầu).
+      const firstRun = !fs.existsSync(path.join(base, 'brain', 'sag.db'));
+      await bs.start({ timeoutMs: firstRun ? 180000 : 60000 });
+      // CHỈ gán khi start() THÀNH CÔNG — gán trước rồi bị throw là lần bấm sau
+      // stop() giết đúng tiến trình đang khoẻ (đã fix ở sidecar.start, đây là nửa
+      // còn lại: main không được giữ tham chiếu tới thứ chưa sống).
+      dashboardSidecar = bs;
       dashboardAliceId = id;
     }
     await dashboard.start();
     shell.openExternal(dashboard.url);
     return { ok: true, url: dashboard.url };
   } catch (err) {
+    // Sidecar lỗi thì KHÔNG giữ tham chiếu — lần bấm sau phải được thử lại từ đầu.
+    dashboardSidecar = null;
+    dashboardAliceId = null;
     return { error: String(err.message || err) };
+  }
+});
+
+/**
+ * ── Báo cáo tuần ───────────────────────────────────────────────────────────
+ * Config sống ở `<alice-home>/report.json` — RIÊNG từng Alice (mỗi Alice một
+ * folder, một brain, một session). Alice gọi tool MCP `report` để thu dữ liệu
+ * (git_commits / plane_issues / chat_messages) và in PDF (export_pdf).
+ */
+
+ipcMain.handle('alice:report:get', async () => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  if (!registry.active) return { config: reportConfigForUI('') };
+  return { config: reportConfigForUI(aliceDirFor(registry.active)) };
+});
+
+ipcMain.handle('alice:report:save', async (_e, patch) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  if (!registry.active) return { error: 'Chưa có Alice nào.' };
+  const base = aliceDirFor(registry.active);
+  // API key đã bị che trong UI ("••••" = không đổi) — chuỗi che thì GIỮ nguyên
+  // bản cũ, không được ghi chuỗi che vào file cấu hình.
+  if (typeof patch.planeApiKey === 'string' && /^•/.test(patch.planeApiKey)) {
+    delete patch.planeApiKey;
+  }
+  reportCfg.save(base, patch);
+  // Ghi lại workspace: opencode.json + .mcp.json cần mang server report mới (đường
+  // dẫn config không đổi nên thực chất là refresh cho chắc — rẻ mà không hại gì).
+  try {
+    provisionWorkspace(settings, {
+      brainMcp: brain && brain.available ? brain.mcpConfig() : null,
+      reportMcp: reportMcpFor(base),
+      dir: path.join(base, 'workspace'),
+      model: currentAlice() && currentAlice().provider === 'claude' ? null : modelFor(currentAlice()).model,
+    });
+  } catch (err) {
+    log.warn(`report:save re-provision: ${err.message}`);
+  }
+  return { config: reportConfigForUI(base) };
+});
+
+ipcMain.handle('alice:report:pick', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Chọn file service account Google (JSON)',
+    filters: [{ name: 'Service account JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  });
+  if (r.canceled || !r.filePaths.length) return { path: '' };
+  return { path: r.filePaths[0] };
+});
+
+/**
+ * "Làm báo cáo tuần ngay" từ UI: nhờ Alice chạy MỘT lượt có sẵn prompt, các tool
+ * report thu dữ liệu từ mốc thứ 5 tuần trước, viết báo cáo theo template — rồi app
+ * in nguyên văn câu trả lời ra PDF. Không gửi GÌ lên Google Chat (chỉ đọc).
+ */
+ipcMain.handle('alice:report:run', async (event) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  if (!registry.active) return { error: 'Chưa có Alice nào.' };
+  if (!runTurn) return { error: 'Chưa có Alice nào đang chạy.' };
+  if (busy) return { error: 'Đang bận một lượt khác — chờ Alice trả lời xong đã.' };
+  if (!engine.available) return { error: 'Engine của Alice chưa sẵn sàng.' };
+
+  const base = aliceDirFor(registry.active);
+  const c = reportCfg.load(base);
+  if (!c.googleServiceAccount && !c.planeApiKey && !c.gitRepos.length) {
+    return { error: 'Chưa cấu hình nguồn nào (Google Chat / Plane / git repos) trong Báo cáo tuần.' };
+  }
+  const since = reportCfg.lastThursday();
+  const template = c.templatePath && fs.existsSync(c.templatePath)
+    ? fs.readFileSync(c.templatePath, 'utf8')
+    : '';
+  const prompt = [
+    '[YÊU CẦU TỰ ĐỘNG — BÁO CÁO TUẦN]',
+    `Bệ hạ cần báo cáo tuần từ THỨ 5 TUẦN TRƯỚC (${since}) tới hôm nay.`,
+    '',
+    'Các bước, làm theo ĐÚNG thứ tự:',
+    '1. Gọi tool `git_commits` (các repo đã cấu hình sẵn).',
+    '2. Gọi tool `plane_issues`.',
+    '3. Gọi tool `chat_messages` (CHỈ ĐỌC — tuyệt đối không gửi tin nhắn lên Google Chat).',
+    '4. Viết báo cáo markdown đầy đủ theo template bên dưới, điền số liệu thật từ 3 bước trên.',
+    '5. Gọi tool `export_pdf` với `markdown` là báo cáo vừa viết — `outPath` để trống để app tự đặt tên.',
+    '',
+    `Template báo cáo${template ? '' : ' (chưa có file template — tự dựng khung hợp lý, giữ mục “Tổng kết tuần”, “Plane tasks”, “Commits”, “Google Chat nổi bật”, “Vướng mắc”, “Tuần tới”)'}:`,
+    template || '',
+    '',
+    'QUY TẮC:',
+    '- Câu trả lời CUỐI CÙNG của em là NGUYÊN VĂN báo cáo markdown (không lời chào, không giải thích bên ngoài) — app sẽ lấy nó in PDF.',
+    '- Báo cáo bằng tiếng Việt.',
+  ].join('\n');
+
+  busy = true;
+  const sender = event.sender;
+  try {
+    pdfExporter = pdfExporter || new PdfExporter();
+    await pdfExporter.start();
+    const seen = new Set();
+    const res = await runTurn(prompt, (partial, ev) => {
+      const act = toolActivity(ev);
+      if (act && !seen.has(act.key)) {
+        seen.add(act.key);
+        sender.send('alice:stream', { activity: act.label, type: 'tool' });
+      }
+      if (partial) sender.send('alice:stream', { text: partial, type: 'text' });
+    });
+    const markdown = String(res && res.text || '');
+    if (!markdown.trim()) return { error: 'Alice trả về báo cáo rỗng — thử lại.' };
+    const today = new Date().toISOString().slice(0, 10);
+    const dir = c.outputDir || base;
+    const safeName = (c.outputName || 'HRM_Weekly_Report').replace(/[\\/:*?"<>|]/g, '_');
+    const outPath = path.join(dir, `${safeName} ${today}.pdf`);
+    const printed = await pdfExporter.print(markdown, c.outputName || 'Báo cáo tuần', outPath);
+    log.info(`weekly report: ${printed.path} (${printed.pages} trang)`);
+    return { ok: true, path: printed.path, pages: printed.pages, text: markdown };
+  } catch (err) {
+    return { error: `Làm báo cáo thất bại: ${err.message}` };
+  } finally {
+    busy = false;
   }
 });
 
@@ -798,6 +960,7 @@ function publicServerFor(id) {
       settings,
       engine: pubEngine,
       brainMcp: bs.available ? bs.mcpConfig() : null,
+      reportMcp: reportMcpFor(base),
       log,
       // Trang chat của khách hiện đúng ảnh của Alice này, không phải ngôi sao chung.
       avatar: () => avatar.current(base),
@@ -1207,7 +1370,15 @@ function badTime(hour, minute) {
   return null;
 }
 
-ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
+/** Ngày trong tuần hợp lệ chưa: NULL (mọi ngày) hoặc số 0–6 theo Date.getDay() (0=CN). */
+function badWeekday(weekday) {
+  if (weekday === null || weekday === undefined || weekday === '') return null;
+  const w = Number(weekday);
+  if (!Number.isInteger(w) || w < 0 || w > 6) return 'Ngày trong tuần phải từ CN (0) tới T7 (6).';
+  return null;
+}
+
+ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task, weekday = null }) => {
   const boom = await ready();
   if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!store) return { error: 'Chưa có Alice nào.' };
@@ -1215,10 +1386,13 @@ ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
   const m = Number(minute);
   const bad = badTime(hour, minute);
   if (bad) return { error: bad };
+  const badW = badWeekday(weekday);
+  if (badW) return { error: badW };
   const text = String(task || '').trim();
   if (!text) return { error: 'Chưa nhập việc cần làm.' };
-  const sched = store.addSchedule({ hour: h, minute: m, task: text });
-  log.info(`schedule added #${sched.id} at ${h}:${String(m).padStart(2, '0')}`);
+  const w = weekday === '' || weekday === null || weekday === undefined ? null : Number(weekday);
+  const sched = store.addSchedule({ hour: h, minute: m, task: text, weekday: w });
+  log.info(`schedule added #${sched.id} at ${h}:${String(m).padStart(2, '0')}${w === null ? '' : ` weekday=${w}`}`);
   return { sched };
 });
 
@@ -1228,9 +1402,9 @@ ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
   if (!store) return { error: 'Chưa có Alice nào.' };
   if (patch.task !== undefined) patch.task = String(patch.task || '').trim();
   if (patch.task === '') return { error: 'Việc cần làm không được để trống.' };
+  const cur = store.getSchedule(Number(id));
+  if (!cur) return { error: 'Không tìm thấy lịch hẹn.' };
   if (patch.hour !== undefined || patch.minute !== undefined) {
-    const cur = store.getSchedule(Number(id));
-    if (!cur) return { error: 'Không tìm thấy lịch hẹn.' };
     const bad = badTime(
       patch.hour !== undefined ? patch.hour : cur.hour,
       patch.minute !== undefined ? patch.minute : cur.minute
@@ -1238,6 +1412,11 @@ ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
     if (bad) return { error: bad };
     if (patch.hour !== undefined) patch.hour = Number(patch.hour);
     if (patch.minute !== undefined) patch.minute = Number(patch.minute);
+  }
+  if (patch.weekday !== undefined) {
+    const badW = badWeekday(patch.weekday);
+    if (badW) return { error: badW };
+    patch.weekday = patch.weekday === '' || patch.weekday === null ? null : Number(patch.weekday);
   }
   const sched = store.updateSchedule(Number(id), patch);
   if (!sched) return { error: 'Không tìm thấy lịch hẹn.' };
@@ -1263,6 +1442,7 @@ ipcMain.handle('alice:shutdown', async () => {
   publicServers.clear();
   if (dashboardSidecar) { dashboardSidecar.stop(); dashboardSidecar = null; }
   dashboard.stop();
+  if (pdfExporter) { pdfExporter.stop(); pdfExporter = null; }
   if (scheduler) scheduler.stop();
   if (brain) brain.stop();
   if (store) {
@@ -1285,6 +1465,7 @@ ipcMain.handle('alice:settings:set', async (_e, patch) => {
   if (memory) memory.settings = settings;
   provisionWorkspace(settings, {
     brainMcp: brain && brain.available ? brain.mcpConfig() : null,
+    reportMcp: registry.active ? reportMcpFor(aliceDirFor(registry.active)) : null,
     dir: registry.active ? path.join(aliceDirFor(registry.active), 'workspace') : null,
     model: alice && alice.provider === 'claude' ? null : picked.model,
   });

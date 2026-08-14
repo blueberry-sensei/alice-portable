@@ -20,7 +20,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-ws-'));
 process.env.ALICE_PORTABLE_ROOT = sandbox;
 
 const config = require('../src/main/config');
-const { provisionWorkspace, buildAgentsMd, buildOpencodeJson } = require('../src/main/alice');
+const { provisionWorkspace, buildAgentsMd, buildOpencodeJson, buildClaudeMcpJson } = require('../src/main/alice');
 
 test('workspace sinh AGENTS.md + opencode.json, đường dẫn MCP là tuyệt đối', () => {
   const brainMcp = {
@@ -88,6 +88,43 @@ test('provisionWorkspace: hook reload-skill.js in ĐÚNG nội dung AGENTS.md ra
   const agentsMd = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
   assert.match(out, /<alice-workspace-reload>/);
   assert.ok(out.includes(agentsMd.trim().slice(0, 200)), 'phải chứa nội dung AGENTS.md');
+});
+
+test('.mcp.json: Claude Code KHÔNG đọc opencode.json — phải sinh file riêng, đúng định dạng', () => {
+  const brainMcp = {
+    type: 'local',
+    command: [path.join(sandbox, 'runtime', 'brain', 'python', 'python.exe'), '-m', 'sag_api.mcp.server'],
+    environment: { PYTHONPATH: path.join(sandbox, 'runtime', 'brain', 'app') },
+    enabled: true,
+  };
+  const reportMcp = {
+    type: 'local',
+    command: [process.execPath, path.join(sandbox, 'mcp-server.js')],
+    environment: { ELECTRON_RUN_AS_NODE: '1', REPORT_CONFIG_FILE: path.join(sandbox, 'report.json') },
+    enabled: true,
+  };
+  const dir = provisionWorkspace({ model: null }, { brainMcp, reportMcp, dir: path.join(sandbox, 'ws-mcpjson') });
+
+  const mcp = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  assert.ok(mcp.mcpServers, 'phải có mcpServers (định dạng Claude Code)');
+  assert.ok(mcp.mcpServers.brain, 'brain phải có mặt');
+  assert.ok(mcp.mcpServers.report, 'report phải có mặt');
+  assert.ok(path.isAbsolute(mcp.mcpServers.report.command),
+    'command phải tuyệt đối — PATH của máy không được quyết định (M-0035)');
+  assert.deepEqual(mcp.mcpServers.report.args, [path.join(sandbox, 'mcp-server.js')],
+    'args phải tách khỏi command');
+  assert.deepEqual(mcp.mcpServers.report.env.REPORT_CONFIG_FILE, path.join(sandbox, 'report.json'));
+  assert.equal(mcp.mcpServers.report.env.ELECTRON_RUN_AS_NODE, '1');
+});
+
+test('.mcp.json: không có server nào thì KHÔNG sinh file — Claude Code không quét rác', () => {
+  const dir = provisionWorkspace({ model: null }, { dir: path.join(sandbox, 'ws-mcpjson-empty') });
+  assert.equal(fs.existsSync(path.join(dir, '.mcp.json')), false, 'file rỗng là rác quét mỗi lần mở');
+});
+
+test('.mcp.json: entry không hợp lệ (type lạ, command rỗng) bị bỏ qua', () => {
+  const mcp = buildClaudeMcpJson({ brainMcp: { type: 'remote', url: 'x' }, reportMcp: { type: 'local', command: [] } });
+  assert.equal(mcp, null, 'cả hai đều không chuyển được sang định dạng Claude → không có file');
 });
 
 test.after(() => {

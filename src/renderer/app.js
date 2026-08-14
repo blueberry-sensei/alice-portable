@@ -665,6 +665,100 @@ async function openCreateAlice(required = false) {
   };
 }
 
+// ── Báo cáo tuần (trong Cài đặt) ───────────────────────────────────────────
+
+const WEEKDAY_LABELS = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+
+/** Đổ form cấu hình báo cáo vào khối `s-report` trong sheet Cài đặt. */
+async function renderReportSettings(aliceId) {
+  const el = $('s-report');
+  if (!el || !aliceId) return;
+  let cfg;
+  try {
+    const r = await window.alice.reportGet();
+    if (r.error) { el.innerHTML = escapeHtml(r.error); return; }
+    cfg = r.config || {};
+  } catch (err) {
+    el.innerHTML = `Không đọc được: ${escapeHtml(String(err && err.message || err))}`;
+    return;
+  }
+  const repos = (cfg.gitRepos || []).join('\n');
+  el.innerHTML = `
+    <div style="display:grid; gap:8px; margin-top:4px">
+      <div style="display:flex; gap:6px">
+        <input id="rp-sa" type="text" placeholder="đường dẫn file service account (JSON)" value="${escapeHtml(cfg.googleServiceAccount || '')}" style="flex:1">
+        <button class="btn ghost" id="rp-sa-pick" style="padding:6px 12px; font-size:12px; white-space:nowrap">Chọn…</button>
+      </div>
+      <input id="rp-space" type="text" placeholder="Google Chat space id — ví dụ: spaces/AAAA… hoặc AAAA…" value="${escapeHtml(cfg.googleSpace || '')}">
+      <div style="display:flex; gap:6px">
+        <input id="rp-plane-url" type="text" placeholder="Plane API base (mặc định https://api.plane.so)" value="${escapeHtml(cfg.planeBaseUrl || 'https://api.plane.so')}" style="flex:1">
+        <input id="rp-plane-ws" type="text" placeholder="Plane workspace slug" value="${escapeHtml(cfg.planeWorkspace || '')}" style="flex:1">
+      </div>
+      <input id="rp-plane-key" type="password" placeholder="${cfg.planeApiKey ? 'đã có key (••••) — gõ vào đây để thay' : 'Plane API key'}" autocomplete="off">
+      <textarea id="rp-repos" rows="3" placeholder="Mỗi dòng một đường dẫn repo git, ví dụ:&#10;D:\\Work\\erp\\kos-erpnext&#10;D:\\Work\\erp\\kos-portal">${escapeHtml(repos)}</textarea>
+      <div style="display:flex; gap:6px">
+        <input id="rp-tpl" type="text" placeholder="template báo cáo (markdown) — để trống là Alice tự dựng khung" value="${escapeHtml(cfg.templatePath || '')}" style="flex:1">
+      </div>
+      <div style="display:flex; gap:6px">
+        <input id="rp-outdir" type="text" placeholder="thư mục xuất PDF (trống = trong thư mục của Alice)" value="${escapeHtml(cfg.outputDir || '')}" style="flex:1">
+        <button class="btn ghost" id="rp-outdir-pick" style="padding:6px 12px; font-size:12px; white-space:nowrap">Chọn…</button>
+      </div>
+      <input id="rp-outname" type="text" placeholder="tên file PDF (mặc định HRM_Weekly_Report)" value="${escapeHtml(cfg.outputName || 'HRM_Weekly_Report')}">
+      <button class="btn ghost" id="rp-run" style="width:100%; padding:9px 14px; font-size:12.5px">Làm báo cáo tuần ngay</button>
+      <div id="rp-msg" class="desc" hidden></div>
+    </div>`;
+  $('rp-sa-pick').onclick = async () => {
+    const r = await window.alice.reportPick();
+    if (r.path) $('rp-sa').value = r.path;
+  };
+  $('rp-outdir-pick').onclick = async () => {
+    const r = await window.alice.pickFolder();
+    if (r.canceled || r.error) return;
+    $('rp-outdir').value = r.dir;
+  };
+  $('rp-run').onclick = async () => {
+    const btn = $('rp-run');
+    const msg = $('rp-msg');
+    btn.disabled = true;
+    btn.textContent = 'Alice đang làm báo cáo — có thể mất vài phút…';
+    msg.hidden = true;
+    try {
+      const r = await window.alice.reportRun();
+      if (r.error) {
+        msg.hidden = false;
+        msg.textContent = r.error;
+      } else {
+        msg.hidden = false;
+        msg.textContent = `Xong: ${r.path} (${r.pages} trang)`;
+      }
+    } catch (err) {
+      msg.hidden = false;
+      msg.textContent = `Lỗi: ${String(err && err.message || err)}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Làm báo cáo tuần ngay';
+    }
+  };
+}
+
+/** Thu giá trị form báo cáo và lưu (sheet Cài đặt bấm Lưu). */
+async function saveReportSettings() {
+  const el = $('s-report');
+  if (!el || !$('rp-sa')) return;
+  const repos = ($('rp-repos').value || '').split('\n').map((s) => s.trim()).filter(Boolean);
+  await window.alice.reportSave({
+    googleServiceAccount: $('rp-sa').value.trim(),
+    googleSpace: $('rp-space').value.trim(),
+    planeBaseUrl: $('rp-plane-url').value.trim() || 'https://api.plane.so',
+    planeWorkspace: $('rp-plane-ws').value.trim(),
+    planeApiKey: $('rp-plane-key').value.trim(),
+    gitRepos: repos,
+    templatePath: $('rp-tpl').value.trim(),
+    outputDir: $('rp-outdir').value.trim(),
+    outputName: $('rp-outname').value.trim() || 'HRM_Weekly_Report',
+  });
+}
+
 async function openSettings() {
   const [status, av] = await Promise.all([window.alice.status(), window.alice.getAvatar()]);
   status.auth = status.auth || { configured: false, providers: [] };
@@ -715,6 +809,11 @@ async function openSettings() {
       <div class="desc" id="s-brain-desc">Dashboard đầy đủ: model trích xuất tri thức, embedding, đồ thị tri thức, telemetry.</div>
     </div>
     <div class="field">
+      <label>Báo cáo tuần</label>
+      <div id="s-report" class="desc">Đang đọc cấu hình…</div>
+      <div class="desc" style="margin-top:6px">Alice tự gom commit git + tasks Plane + tin nhắn Google Chat (chỉ đọc) từ thứ 5 tuần trước, viết báo cáo rồi in PDF.</div>
+    </div>
+    <div class="field">
       <label>Cuộc trò chuyện</label>
       <button class="btn ghost" id="s-clear" style="width:100%; padding:9px 14px; font-size:12.5px">Xoá cuộc trò chuyện này…</button>
       <div class="desc">Xoá hết những gì đã nói với Alice này. Không lấy lại được. Muốn xoá lẻ một tin thì rê chuột lên tin đó trong khung chat.</div>
@@ -733,6 +832,7 @@ async function openSettings() {
     if (model !== currentModel) {
       await window.alice.aliceSetModel(status.active, model);
     }
+    await saveReportSettings();
     await refreshHeader();
     renderConnection(); // model vừa đổi — panel bên phải phải nói đúng model mới
   });
@@ -790,6 +890,8 @@ async function openSettings() {
   };
 
   $('s-clear').onclick = clearChat;
+
+  renderReportSettings(status.active);
 
   $('s-pick').onclick = async () => {
     const r = await window.alice.pickAvatar();
@@ -1161,11 +1263,16 @@ async function renderRoutines() {
   const editor = (s) => {
     const hh = s ? String(s.hour).padStart(2, '0') : '';
     const mm = s ? String(s.minute).padStart(2, '0') : '';
+    const wd = s && typeof s.weekday === 'number' ? s.weekday : '';
+    const wdOptions = ['', '0', '1', '2', '3', '4', '5', '6']
+      .map((v) => `<option value="${v}"${String(wd) === v ? ' selected' : ''}>${v === '' ? 'Mỗi ngày' : ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'][Number(v)]}</option>`)
+      .join('');
     return `<div class="rt-edit">
       <div class="rt-times">
         <input class="rt-h" type="number" min="0" max="23" placeholder="giờ" value="${escapeHtml(hh)}">
         <span style="color:var(--muted)">:</span>
         <input class="rt-m" type="number" min="0" max="59" placeholder="phút" value="${escapeHtml(mm)}">
+        <select class="rt-w" title="Chỉ chạy vào một ngày trong tuần">${wdOptions}</select>
       </div>
       <textarea class="rt-t" placeholder="Việc cần làm, ví dụ: Tóm tắt hôm nay rồi gợi ý việc mai">${escapeHtml(s ? s.task : '')}</textarea>
       <div class="rt-err" hidden></div>
@@ -1188,9 +1295,10 @@ async function renderRoutines() {
     }
     const hh = String(s.hour).padStart(2, '0');
     const mm = String(s.minute).padStart(2, '0');
+    const wd = typeof s.weekday === 'number' ? ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'][s.weekday] : '';
     parts.push(`<div class="rt-item${s.enabled ? '' : ' off'}" data-id="${s.id}" title="Bấm để sửa">
       <div class="rt-top">
-        <span class="rt-time">${hh}:${mm}</span>
+        <span class="rt-time">${hh}:${mm}${wd ? ` <span class="rt-wd">${wd}</span>` : ''}</span>
         <div class="rt-actions">
           <button class="rail-btn rt-toggle" data-on="${s.id}" title="${s.enabled ? 'Đang bật — bấm để tắt' : 'Đang tắt — bấm để bật'}">${s.enabled ? '⏸' : '▶'}</button>
         </div>
@@ -1228,10 +1336,12 @@ async function renderRoutines() {
     await renderRoutines();
   };
   box.querySelector('.rt-save').onclick = async () => {
+    const wv = box.querySelector('.rt-w').value;
     const patch = {
       hour: box.querySelector('.rt-h').value,
       minute: box.querySelector('.rt-m').value,
       task: box.querySelector('.rt-t').value,
+      weekday: wv === '' ? '' : Number(wv),
     };
     const r = idNow === 'new'
       ? await window.alice.schedAdd(patch)
@@ -1325,9 +1435,6 @@ async function renderConnection() {
       ${row('Đang dùng', info.model || 'mặc định của engine', true)}
     </div>
   </div>`);
-
-  parts.push('<div class="cn-note">Số quota còn lại không hiện ở đây: cả <code>claude</code> lẫn '
-    + '<code>opencode</code> đều không có lệnh nào trả về con số đó. Chấm xanh nghĩa là kết nối dùng được.</div>');
 
   el.innerHTML = parts.join('');
 

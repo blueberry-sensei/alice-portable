@@ -23,10 +23,12 @@ function today(now = new Date()) {
 /**
  * Lịch có phải lúc phải chạy ngay bây giờ không — hàm thuần để test được.
  * `sched` là một dòng từ bảng schedules; `lastRun` so theo NGÀY.
+ * `weekday`: 0=CN, 1=T2 … 6=T7 theo `Date.getDay()`. NULL = mọi ngày (lịch cũ).
  */
 function isDue(sched, now, lastRunDay = null) {
   if (!sched || !sched.enabled) return false;
   if (sched.hour !== now.getHours() || sched.minute !== now.getMinutes()) return false;
+  if (typeof sched.weekday === 'number' && sched.weekday !== now.getDay()) return false;
   if (lastRunDay === today(now)) return false;
   return true;
 }

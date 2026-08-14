@@ -74,6 +74,12 @@ contextBridge.exposeInMainWorld('alice', {
   schedRemove: (id) => ipcRenderer.invoke('alice:sched:remove', id),
   shutdown: () => ipcRenderer.invoke('alice:shutdown'),
 
+  // Báo cáo tuần (mỗi Alice một cấu hình riêng).
+  reportGet: () => ipcRenderer.invoke('alice:report:get'),
+  reportSave: (patch) => ipcRenderer.invoke('alice:report:save', patch),
+  reportPick: () => ipcRenderer.invoke('alice:report:pick'),
+  reportRun: () => ipcRenderer.invoke('alice:report:run'),
+
   // Cập nhật: kiểm tra + mở trang tải (không tự tải/cài — chốt của Bệ hạ).
   updateCheck: () => ipcRenderer.invoke('alice:update:check'),
   updateOpen: (url) => ipcRenderer.invoke('alice:update:open', url),

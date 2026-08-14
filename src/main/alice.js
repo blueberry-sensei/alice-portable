@@ -94,7 +94,7 @@ function buildAgentsMd(knowledgeDir) {
  * của MỌI workspace, mỗi lần boot. `null` = không ghi gì, để opencode tự xoay
  * vòng theo `modelPreference`.
  */
-function buildOpencodeJson(settings, { brainMcp = null, model = null } = {}) {
+function buildOpencodeJson(settings, { brainMcp = null, reportMcp = null, model = null } = {}) {
   const cfg = {
     $schema: 'https://opencode.ai/config.json',
     // Nhắc lại cho rõ: `instructions` trỏ vào AGENTS.md cùng thư mục.
@@ -102,8 +102,39 @@ function buildOpencodeJson(settings, { brainMcp = null, model = null } = {}) {
     mcp: {},
   };
   if (brainMcp) cfg.mcp.brain = brainMcp;
+  if (reportMcp) cfg.mcp.report = reportMcp;
   if (model) cfg.model = model;
   return cfg;
+}
+
+/**
+ * Bản `.mcp.json` cho Claude Code — đổi từ định dạng opencode sang định dạng Claude.
+ *
+ * Vì sao cần riêng: Claude Code KHÔNG đọc `opencode.json` — nó đọc `.mcp.json`
+ * trong thư mục làm việc. Alice engine `claude` (Alice K-OS) chỉ nhìn thấy brain
+ * MCP khi file này được sinh kèm; đo thật 2026-08-14: chưa có file này nên brain
+ * không tới tay Alice K-OS. Đường dẫn vẫn là tuyệt đối tới runtime NHÚNG (`D-0053`
+ * mục 3) — không `npx`, không `python` trần trên PATH.
+ *
+ * Chỉ ghi khi có ít nhất một server — file rỗng làm Claude Code quét vô ích.
+ */
+function buildClaudeMcpJson({ brainMcp = null, reportMcp = null } = {}) {
+  const servers = {};
+  const entries = [
+    ['brain', brainMcp],
+    ['report', reportMcp],
+  ];
+  for (const [name, e] of entries) {
+    if (!e || e.type !== 'local' || !Array.isArray(e.command) || e.command.length === 0) continue;
+    const [command, ...args] = e.command;
+    servers[name] = {
+      command,
+      args,
+      ...(e.environment && Object.keys(e.environment).length ? { env: e.environment } : {}),
+    };
+  }
+  if (Object.keys(servers).length === 0) return null;
+  return { mcpServers: servers };
 }
 
 /**
@@ -160,16 +191,24 @@ process.stdout.write([
  * `dir` mặc định là workspace chung; public server dùng workspace RIÊNG của từng
  * Alice (`alices/<id>/workspace`) để mỗi máy chủ chạy đúng AGENTS.md + MCP của nó.
  */
-function provisionWorkspace(settings, { brainMcp = null, dir = null, model = null } = {}) {
+function provisionWorkspace(settings, { brainMcp = null, reportMcp = null, dir = null, model = null } = {}) {
   const target = dir || config.workDir();
   fs.mkdirSync(target, { recursive: true });
 
   fs.writeFileSync(path.join(target, 'AGENTS.md'), buildAgentsMd(config.knowledgeDir()), 'utf8');
   fs.writeFileSync(
     path.join(target, 'opencode.json'),
-    JSON.stringify(buildOpencodeJson(settings, { brainMcp, model }), null, 2),
+    JSON.stringify(buildOpencodeJson(settings, { brainMcp, reportMcp, model }), null, 2),
     'utf8'
   );
+  // Claude Code không đọc opencode.json — nó đọc .mcp.json (xem buildClaudeMcpJson).
+  // Có file mới khi có server thật; Alice engine `claude` sẽ thấy brain + report.
+  const claudeMcp = buildClaudeMcpJson({ brainMcp, reportMcp });
+  if (claudeMcp) {
+    fs.writeFileSync(path.join(target, '.mcp.json'), JSON.stringify(claudeMcp, null, 2), 'utf8');
+  } else {
+    fs.rmSync(path.join(target, '.mcp.json'), { force: true });
+  }
 
   // Hook cho Claude Code — sinh LUÔN dù Alice đang dùng opencode: vô hại (opencode
   // không đọc `.claude/`), và Alice đổi provider sau này thì hook đã sẵn sàng.
@@ -188,6 +227,6 @@ function provisionWorkspace(settings, { brainMcp = null, dir = null, model = nul
 }
 
 module.exports = {
-  provisionWorkspace, buildAgentsMd, buildOpencodeJson, buildClaudeSettings, buildReloadSkillHook,
+  provisionWorkspace, buildAgentsMd, buildOpencodeJson, buildClaudeMcpJson, buildClaudeSettings, buildReloadSkillHook,
   NO_NEXT_TURN, MEMORY_NOTE,
 };

@@ -38,6 +38,17 @@ test('isDue: đúng giờ:phút + chưa chạy hôm nay thì chạy', () => {
   assert.equal(isDue(sched, at(10, 30), '2026-08-12'), false, 'sai giờ → không chạy');
 });
 
+test('isDue: weekday — chỉ chạy đúng ngày trong tuần, NULL = mọi ngày', () => {
+  // 13/08/2026 là Thứ 5 → getDay() === 4
+  const sched = { enabled: 1, hour: 9, minute: 0, weekday: 4 };
+  assert.equal(isDue(sched, at(9, 0), null), true, 'đúng thứ (T5=4) + đúng giờ → chạy');
+  assert.equal(isDue({ ...sched, weekday: 3 }, at(9, 0), null), false, 'nhầm thứ (T4=3) → không chạy');
+  assert.equal(isDue({ ...sched, weekday: 0 }, at(9, 0), null), false, 'chủ nhật khác thứ → không chạy');
+  assert.equal(isDue({ ...sched, weekday: null }, at(9, 0), null), true, 'không đặt thứ (lịch cũ) → mọi ngày');
+  assert.equal(isDue({ ...sched, weekday: 4 }, at(9, 1), null), false, 'đúng thứ nhưng nhầm phút → không chạy');
+  assert.equal(isDue({ ...sched, weekday: 4 }, at(9, 0), '2026-08-13'), false, 'đúng thứ nhưng đã chạy hôm nay → không chạy');
+});
+
 test('isDue: chạy xong hôm qua thì hôm nay lại đúng giờ là chạy', () => {
   const sched = { enabled: 1, hour: 8, minute: 0 };
   assert.equal(isDue(sched, at(8, 0), '2026-08-12'), true, 'last_run là ngày cũ → chạy tiếp');
@@ -98,6 +109,23 @@ test('scheduler: CRUD lịch hẹn đầy đủ', () => {
 
   store.removeSchedule(s.id);
   assert.equal(store.listSchedules().length, 0);
+  store.close();
+});
+
+test('scheduler: CRUD có weekday — lưu được, sửa được, kho cũ vẫn đọc được', () => {
+  const store = new Store(tmpDb());
+  const s = store.addSchedule({ hour: 8, minute: 0, task: 'Báo cáo tuần', weekday: 5 });
+  assert.equal(store.getSchedule(s.id).weekday, 5, 'lưu thứ 6 (5)');
+  assert.equal(isDue(store.getSchedule(s.id), new Date(2026, 7, 14, 8, 0), null), true,
+    '14/08/2026 là Thứ 6 → đúng giờ đúng thứ → chạy');
+  assert.equal(isDue(store.getSchedule(s.id), new Date(2026, 7, 13, 8, 0), null), false,
+    '13/08 là Thứ 5 → không chạy');
+
+  store.updateSchedule(s.id, { weekday: null });
+  assert.equal(store.getSchedule(s.id).weekday, null, 'bỏ thứ → mọi ngày');
+
+  store.addSchedule({ hour: 9, minute: 0, task: 'Không đặt thứ' });
+  assert.equal(store.listSchedules().filter((x) => x.weekday === null).length, 2);
   store.close();
 });
 

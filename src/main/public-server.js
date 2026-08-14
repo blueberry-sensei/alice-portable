@@ -90,6 +90,7 @@ function anonName(size = 5) {
  * @param {object} opts.settings    settings chung của app
  * @param {object} opts.engine      OpencodeEngine (dùng chung, setBaseDir riêng)
  * @param {object} opts.brainMcp    cấu hình MCP brain của Alice này (hoặc null)
+ * @param {object} opts.reportMcp   cấu hình MCP report của Alice này (hoặc null)
  * @param {object} opts.log         logger
  * @param {function} opts.avatar    () => data URI ảnh của Alice (tuỳ chọn)
  */
@@ -100,6 +101,7 @@ class PublicServer {
     this.settings = opts.settings;
     this.engine = opts.engine;
     this.brainMcp = opts.brainMcp;
+    this.reportMcp = opts.reportMcp || null;
     this.log = opts.log;
     this.avatar = opts.avatar || (() => null);
     // Báo cho tiến trình chính khi có tin MỚI từ phòng chat công khai này — để cửa
@@ -207,7 +209,7 @@ class PublicServer {
       // compact quyết định Alice còn nhớ được gì sau khi xoay session.
       const memory = new Memory(this.store, this.settings, this._summarizer());
       const workDir = path.join(this.baseDir, 'workspace');
-      provisionWorkspace(this.settings, { brainMcp: this.brainMcp, dir: workDir });
+      provisionWorkspace(this.settings, { brainMcp: this.brainMcp, reportMcp: this.reportMcp, dir: workDir });
       this.runTurn = createTurnRunner({ store: this.store, memory, engine: this.engine, workDir, settings: this.settings });
     }
     try {

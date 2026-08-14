@@ -191,27 +191,59 @@ class BrainSidecar {
    *
    * Chỉ cần cho ingest/sync tri thức, KHÔNG cần cho recall. Mặc định tắt: một tiến
    * trình không dùng tới là một tiến trình có thể chết âm thầm rồi đổ lỗi cho chỗ khác.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.timeoutMs]  chờ healthy bao lâu. Lần đầu mở brain của một
+   *   Alice, Windows Defender quét cả cây python mới cài nên rất lâu — người gọi
+   *   truyền 180s thay vì 30s mặc định (xem `alice:brain:open` trong main.js).
    */
-  async start() {
+  async start({ timeoutMs = 30000 } = {}) {
     if (!this.available) throw new Error(`Chưa đóng gói brain: thiếu ${this.pythonPath}`);
     if (!this.settings.http) return { started: false, reason: 'http-disabled' };
     if (this.proc) return { started: true, reason: 'already-running' };
 
+    // Đã có một tiến trình sag_api đang phục vụ ĐÚNG cổng này (spawn lần trước bỏ
+    // dở giữa chừng, hoặc sidecar của Alice này còn sống từ đợt mở trước) → dùng
+    // luôn, không spawn cái thứ hai giành cổng. Chỉ tin khi header xác nhận là
+    // uvicorn — một app khác đang chiếm cổng thì KHÔNG được mặc định "thế là xong".
+    const host = this.settings.host || '127.0.0.1';
+    const port = this.settings.port || 8931;
+    if (await this._probe(`http://${host}:${port}/`)) {
+      this.lastError = null;
+      return { started: true, reason: 'already-serving' };
+    }
+
     this.proc = spawn(this.pythonPath, ['-m', 'sag_api.desktop'], {
       cwd: this.appDir,
       windowsHide: true,
+      // `stderr` phải có người đọc: python hỏng lúc import/startup sẽ in lỗi ra
+      // đây, và câu lỗi đó phải tới tay người dùng thay cho "fetch failed" chung
+      // chung. Bản trước để pipe mặc định mà không ai đọc — lỗi thật bị nuốt sạch.
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...this.env() },
     });
+    let stderr = '';
+    this.proc.stderr.on('data', (b) => { stderr += b.toString('utf8'); });
     this.proc.on('exit', (code) => {
       this.lastError = code === 0 ? null : `sidecar thoát mã ${code}`;
       this.proc = null;
     });
 
-    await this._waitHealthy(30000);
+    try {
+      await this._waitHealthy(timeoutMs, () => stderr);
+    } catch (err) {
+      // KHÔNG để lại tiến trình mồ côi: sidecar vẫn sống sau khi `start()` throw là
+      // gốc của bug "bấm Xem Alice Brain mãi không mở" — main.js tưởng nó chết, lần
+      // bấm sau lại stop() giết đúng cái vừa lên rồi spawn lại từ đầu. Giết ở đây,
+      // đặt `this.proc = null`, rồi mới nói lỗi.
+      try { this.proc.kill(); } catch { /* đã chết */ }
+      this.proc = null;
+      throw err;
+    }
     return { started: true, reason: null };
   }
 
-  async _waitHealthy(timeoutMs) {
+  async _waitHealthy(timeoutMs, stderrOf = () => '') {
     const url = `http://${this.settings.host || '127.0.0.1'}:${this.settings.port || 8931}/`;
     const deadline = Date.now() + timeoutMs;
     let last;
@@ -225,7 +257,24 @@ class BrainSidecar {
       }
       await new Promise((r) => setTimeout(r, 500));
     }
-    throw new Error(`Brain sidecar không lên sau ${timeoutMs}ms (${last})`);
+    // Lỗi THẬT từ python (import hỏng, thiếu thư viện, cổng bận…) nằm trong stderr —
+    // nhét vào câu lỗi thay cho "fetch failed" không nói lên được gì.
+    const why = stderrOf().trim().slice(-400);
+    throw new Error(
+      `Brain sidecar không lên sau ${timeoutMs}ms (${last})`
+      + (why ? ` — ${why}` : '')
+    );
+  }
+
+  /** Đúng cổng này có ai phục vụ và đó là uvicorn (sag_api) không. */
+  async _probe(url) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      const server = String(res.headers.get('server') || '');
+      return server.toLowerCase().includes('uvicorn');
+    } catch {
+      return false;
+    }
   }
 
   stop() {

@@ -108,6 +108,12 @@ class Store {
       // đi qua engine ở thời điểm được gửi.
       this.db.exec('ALTER TABLE messages ADD COLUMN delivered INTEGER NOT NULL DEFAULT 1');
     }
+    const sched = this.db.prepare('PRAGMA table_info(schedules)').all().map((c) => c.name);
+    if (!sched.includes('weekday')) {
+      // Lịch hẹn "mỗi thứ X" (vd làm báo cáo tuần sáng thứ 6). NULL = mọi ngày —
+      // các lịch cũ không có cột này vẫn chạy đúng như trước.
+      this.db.exec('ALTER TABLE schedules ADD COLUMN weekday INTEGER');
+    }
   }
 
   close() {
@@ -196,10 +202,10 @@ class Store {
     return this.db.prepare('SELECT * FROM schedules ORDER BY hour, minute, id').all();
   }
 
-  addSchedule({ hour, minute, task }) {
+  addSchedule({ hour, minute, task, weekday = null }) {
     const res = this.db.prepare(
-      'INSERT INTO schedules (enabled, hour, minute, task, created_at) VALUES (1, ?, ?, ?, ?)'
-    ).run(hour, minute, task, Date.now());
+      'INSERT INTO schedules (enabled, hour, minute, task, weekday, created_at) VALUES (1, ?, ?, ?, ?, ?)'
+    ).run(hour, minute, task, weekday, Date.now());
     return this.getSchedule(Number(res.lastInsertRowid));
   }
 
@@ -212,8 +218,8 @@ class Store {
     if (!cur) return null;
     const next = { ...cur, ...patch };
     this.db.prepare(
-      'UPDATE schedules SET enabled = ?, hour = ?, minute = ?, task = ? WHERE id = ?'
-    ).run(next.enabled ? 1 : 0, next.hour, next.minute, next.task, id);
+      'UPDATE schedules SET enabled = ?, hour = ?, minute = ?, task = ?, weekday = ? WHERE id = ?'
+    ).run(next.enabled ? 1 : 0, next.hour, next.minute, next.task, next.weekday ?? null, id);
     return this.getSchedule(id);
   }
 
