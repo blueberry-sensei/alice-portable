@@ -6,7 +6,21 @@
  *
  * Định dạng đầy đủ:
  * {
- *   "googleServiceAccount": "C:\\path\\sa.json",  // Google Cloud service account
+ *   "googleServiceAccount": "C:\\path\\sa.json",  // hai dạng file, tự nhận theo
+ *                                                  // field có mặt (xem
+ *                                                  // report/collector.js#chatMessages):
+ *                                                  //   - service account thật
+ *                                                  //     (project thuộc Workspace
+ *                                                  //     org, app đã join space) —
+ *                                                  //     tải từ Cloud Console.
+ *                                                  //   - hoặc file sinh bởi
+ *                                                  //     scripts/chat-user-login.js
+ *                                                  //     (project "personal
+ *                                                  //     account" — Google khoá
+ *                                                  //     "Join spaces" của mọi
+ *                                                  //     Chat app trong trường
+ *                                                  //     hợp này, đường service
+ *                                                  //     account không dùng được).
  *   "googleSpace": "spaces/AAA...",               // Google Chat space id
  *   "planeBaseUrl": "https://api.plane.so",
  *   "planeApiKey": "pla_...",

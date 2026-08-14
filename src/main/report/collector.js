@@ -130,30 +130,88 @@ async function serviceAccountToken(cred, scopes) {
 }
 
 /**
+ * Access token từ refresh_token của MỘT NGƯỜI DÙNG thật (không phải app/bot).
+ *
+ * Dùng khi project GCP không thuộc Workspace org nào ("personal account") —
+ * lúc đó Google KHOÁ CỨNG "Join spaces and group conversations" của mọi Chat
+ * app (đo thật 2026-08-14, banner của chính Google: "Users with personal
+ * Google accounts can only create apps for personal use... disabled
+ * automatically"), nên đường service-account/app-authentication ở trên
+ * KHÔNG BAO GIỜ thêm được app vào space. Lối này né hẳn khái niệm "app": Alice
+ * đọc CHAT THAY người dùng đã tự OAuth (bằng `scripts/chat-user-login.js`),
+ * y hệt cách một người dùng bình thường xem được tin trong không gian họ đã
+ * là thành viên — không cần thêm ai vào đâu cả.
+ */
+async function userAccessToken(cred) {
+  // `token_uri` KHÔNG có trong file thật do chat-user-login.js sinh ra (luôn là
+  // endpoint Google) — chỉ tồn tại trong fixture test để trỏ vào mock server,
+  // giống hệt cách serviceAccountToken() đọc `cred.token_uri` ở trên.
+  const tokenUri = cred.token_uri || 'https://oauth2.googleapis.com/token';
+  let res;
+  try {
+    res = await fetch(tokenUri, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: cred.client_id,
+        client_secret: cred.client_secret,
+        refresh_token: cred.refresh_token,
+        grant_type: 'refresh_token',
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (err) {
+    return { error: `Không làm mới được access token: ${err.message}` };
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    return { error: `Làm mới token thất bại: HTTP ${res.status} ${JSON.stringify(data).slice(0, 300)}` };
+  }
+  return { token: data.access_token };
+}
+
+/**
  * Tin nhắn Google Chat từ `since` (YYYY-MM-DD), theo thứ tự thời gian.
  * `chatBaseUrl` chỉ để test trỏ vào server giả; mặc định là Google thật.
+ *
+ * `credentialsPath` chấp nhận HAI dạng file, tự nhận theo field có mặt:
+ *   - `refresh_token` → OAuth người dùng (`scripts/chat-user-login.js`) — dùng
+ *     khi project là "personal account", không join space được (xem
+ *     `userAccessToken`).
+ *   - `private_key`   → service account (app-authentication) — chỉ dùng được
+ *     khi project thuộc Workspace org VÀ app đã được thêm vào space.
  */
 async function chatMessages({ credentialsPath, space, since, chatBaseUrl = 'https://chat.googleapis.com', limit = 500 }) {
   if (!credentialsPath || !fs.existsSync(credentialsPath)) {
-    return { error: `Không tìm thấy file service account: ${credentialsPath}` };
+    return { error: `Không tìm thấy file credentials Google Chat: ${credentialsPath}` };
   }
   let cred;
   try {
     cred = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
   } catch (err) {
-    return { error: `Đọc file service account lỗi: ${err.message}` };
-  }
-  if (!cred.client_email || !cred.private_key || !cred.token_uri) {
-    return { error: 'File service account thiếu client_email/private_key/token_uri.' };
+    return { error: `Đọc file credentials lỗi: ${err.message}` };
   }
 
-  // `chat.bot` (app-authentication, KHÔNG cần domain-wide delegation) — cố ý
-  // không dùng `chat.messages.readonly`: đó là "restricted scope", app-auth với
-  // scope đó cần Workspace admin phê duyệt một lần qua Marketplace SDK trước khi
-  // gọi được (xem developers.google.com/workspace/chat/authenticate-authorize —
-  // bảng OAuth scope, cột "App authentication approval"). `chat.bot` không cần
-  // bước đó, chỉ cần app đã là thành viên của space.
-  const tok = await serviceAccountToken(cred, ['https://www.googleapis.com/auth/chat.bot']);
+  let tok;
+  if (cred.refresh_token) {
+    if (!cred.client_id || !cred.client_secret) {
+      return { error: 'File OAuth người dùng thiếu client_id/client_secret/refresh_token.' };
+    }
+    tok = await userAccessToken(cred);
+  } else if (cred.private_key) {
+    if (!cred.client_email || !cred.token_uri) {
+      return { error: 'File service account thiếu client_email/private_key/token_uri.' };
+    }
+    // `chat.bot` (app-authentication, KHÔNG cần domain-wide delegation) — cố ý
+    // không dùng `chat.messages.readonly`: đó là "restricted scope", app-auth với
+    // scope đó cần Workspace admin phê duyệt một lần qua Marketplace SDK trước khi
+    // gọi được (xem developers.google.com/workspace/chat/authenticate-authorize —
+    // bảng OAuth scope, cột "App authentication approval"). `chat.bot` không cần
+    // bước đó, chỉ cần app đã là thành viên của space.
+    tok = await serviceAccountToken(cred, ['https://www.googleapis.com/auth/chat.bot']);
+  } else {
+    return { error: 'File credentials lạ — thiếu cả refresh_token (OAuth người dùng) lẫn private_key (service account).' };
+  }
   if (tok.error) return tok;
 
   // `space` chấp nhận cả "spaces/AAAA..." lẫn id trần.
@@ -179,7 +237,10 @@ async function chatMessages({ credentialsPath, space, since, chatBaseUrl = 'http
     }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      return { error: `Google Chat trả HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ''} — app có được thêm vào space không?` };
+      const hint = cred.refresh_token
+        ? 'người OAuth có phải thành viên của space này không?'
+        : 'app có được thêm vào space không?';
+      return { error: `Google Chat trả HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ''} — ${hint}` };
     }
     const data = await res.json().catch(() => ({}));
     const messages = Array.isArray(data.messages) ? data.messages : [];
@@ -199,4 +260,4 @@ async function chatMessages({ credentialsPath, space, since, chatBaseUrl = 'http
   return { rows: out.slice(0, limit) };
 }
 
-module.exports = { gitLog, planeIssues, chatMessages, serviceAccountToken };
+module.exports = { gitLog, planeIssues, chatMessages, serviceAccountToken, userAccessToken };

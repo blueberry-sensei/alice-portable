@@ -245,11 +245,95 @@ test('serviceAccountToken: chữ ký JWT RS256 hợp lệ với public key', asy
   server.close();
 });
 
-test('chatMessages: thiếu file service account thì lỗi rõ, không throw', async () => {
+test('chatMessages: thiếu file credentials thì lỗi rõ, không throw', async () => {
   const r = await chatMessages({
     credentialsPath: 'Z:\\khong-ton-tai\\sa.json',
     space: 'AAAA',
     since: '2026-08-06',
   });
-  assert.match(r.error, /Không tìm thấy file service account/);
+  assert.match(r.error, /Không tìm thấy file credentials/);
+});
+
+test('chatMessages: file lạ (thiếu cả refresh_token lẫn private_key) → lỗi rõ', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-sa-bad-'));
+  const f = path.join(dir, 'sa.json');
+  fs.writeFileSync(f, JSON.stringify({ hello: 'world' }));
+  const r = await chatMessages({ credentialsPath: f, space: 'AAAA', since: '2026-08-06' });
+  assert.match(r.error, /thiếu cả refresh_token.*private_key/);
+});
+
+// ── Google Chat qua OAuth NGƯỜI DÙNG (project "personal account") ──────────
+
+test('chatMessages: nhận diện file OAuth người dùng qua refresh_token, đọc tin bằng access_token làm mới', async () => {
+  let seenRefresh = false;
+  let seenAuth = null;
+  const server = await mockServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (req.method === 'POST' && u.pathname === '/token') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        const params = new URLSearchParams(body);
+        assert.equal(params.get('grant_type'), 'refresh_token');
+        assert.equal(params.get('refresh_token'), 'rt-abc');
+        assert.equal(params.get('client_id'), 'cid-123');
+        seenRefresh = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'fresh-access-tok' }));
+      });
+      return;
+    }
+    if (req.method === 'GET' && u.pathname === '/v1/spaces/BBBB/messages') {
+      seenAuth = req.headers.authorization;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        messages: [{ text: 'tin của sếp', sender: { displayName: 'Boss' }, createTime: '2026-08-12T09:00:00Z' }],
+      }));
+      return;
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  const port = server.address().port;
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-oauth-user-'));
+  const credFile = path.join(dir, 'chat-user.json');
+  fs.writeFileSync(credFile, JSON.stringify({
+    type: 'user',
+    client_id: 'cid-123',
+    client_secret: 'secret-xyz',
+    refresh_token: 'rt-abc',
+    token_uri: `http://127.0.0.1:${port}/token`, // chỉ fixture test mới có field này
+  }));
+
+  const { rows, error } = await chatMessages({
+    credentialsPath: credFile,
+    space: 'BBBB',
+    since: '2026-08-06',
+    chatBaseUrl: `http://127.0.0.1:${port}`,
+  });
+
+  assert.equal(error, undefined);
+  assert.ok(seenRefresh, 'phải gọi refresh_token grant');
+  assert.equal(seenAuth, 'Bearer fresh-access-tok');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].author, 'Boss');
+  server.close();
+});
+
+test('chatMessages: OAuth người dùng — refresh token hỏng thì lỗi rõ, không throw', async () => {
+  const server = await mockServer((req, res) => {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid_grant' }));
+  });
+  const port = server.address().port;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-oauth-user-bad-'));
+  const credFile = path.join(dir, 'chat-user.json');
+  fs.writeFileSync(credFile, JSON.stringify({
+    client_id: 'cid', client_secret: 'sec', refresh_token: 'rt',
+    token_uri: `http://127.0.0.1:${port}/token`,
+  }));
+
+  const r = await chatMessages({ credentialsPath: credFile, space: 'BBBB', since: '2026-08-06' });
+  assert.match(r.error, /Làm mới token thất bại/);
+  server.close();
 });

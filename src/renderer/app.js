@@ -686,7 +686,7 @@ async function renderReportSettings(aliceId) {
   el.innerHTML = `
     <div style="display:grid; gap:8px; margin-top:4px">
       <div style="display:flex; gap:6px">
-        <input id="rp-sa" type="text" placeholder="đường dẫn file service account (JSON)" value="${escapeHtml(cfg.googleServiceAccount || '')}" style="flex:1">
+        <input id="rp-sa" type="text" placeholder="file service account, hoặc file từ scripts/chat-user-login.js" value="${escapeHtml(cfg.googleServiceAccount || '')}" style="flex:1">
         <button class="btn ghost" id="rp-sa-pick" style="padding:6px 12px; font-size:12px; white-space:nowrap">Chọn…</button>
       </div>
       <input id="rp-space" type="text" placeholder="Google Chat space id — ví dụ: spaces/AAAA… hoặc AAAA…" value="${escapeHtml(cfg.googleSpace || '')}">
