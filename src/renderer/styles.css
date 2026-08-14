@@ -80,12 +80,117 @@ body {
 }
 
 /* ── khung app ──────────────────────────────────────────────────────────── */
+/* 980px là bề rộng của MỘT khung chat. Cửa sổ mặc định rộng 1440 nên phần còn lại
+   trước đây là hai vệt nền tím trống trơn hai bên — chỗ đó nay là hai rail. */
 .app {
   position: relative; z-index: 2;
-  height: 100vh; max-width: 980px; margin: 0 auto;
+  height: 100vh; max-width: 1640px; margin: 0 auto;
   padding: 18px 20px 20px;
   display: flex; flex-direction: column; gap: 14px;
 }
+
+/* ── màn chat: ba cột ───────────────────────────────────────────────────── */
+.stage {
+  flex: 1; min-height: 0;
+  display: grid;
+  grid-template-columns: 288px minmax(0, 1fr) 312px;
+  gap: 14px;
+}
+/* Cửa sổ hẹp hơn mức hai rail còn đọc được thì bỏ chúng đi — ba cột nhồi vào
+   900px là ba cột không dùng được cột nào. `minWidth` của cửa sổ (main.js) đã
+   đặt trên ngưỡng này, nên đây chỉ là lưới an toàn cho màn hình nhỏ bất thường. */
+@media (max-width: 1180px) {
+  .stage { grid-template-columns: minmax(0, 1fr); }
+  .stage .rail { display: none; }
+}
+
+.rail {
+  display: flex; flex-direction: column; min-height: 0;
+  border-radius: 24px; border: 1px solid var(--border);
+  background: var(--deep); overflow: hidden;
+}
+.rail-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  background: rgba(20,27,45,.85); flex-shrink: 0;
+}
+.rail-title {
+  font-family: 'Baloo 2', cursive; font-weight: 800; font-size: 14.5px; color: var(--text);
+}
+.rail-btn {
+  width: 26px; height: 26px; border-radius: 9px; flex-shrink: 0;
+  border: 1px solid var(--border-2); background: transparent;
+  color: var(--body-text); font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .22s ease; font-family: inherit;
+}
+.rail-btn:hover { border-color: var(--primary); color: var(--primary); }
+.rail-btn:disabled { opacity: .45; cursor: default; }
+.rail-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.rail-empty { font-size: 12px; color: var(--muted); line-height: 1.6; padding: 4px 2px; }
+/* Hàng nút nhỏ trong một thẻ của rail — dùng chung cho cả hai bên. */
+.rail-actions { display: flex; gap: 7px; margin-top: 8px; }
+
+/* ── rail trái: Routine ─────────────────────────────────────────────────── */
+.rt-item {
+  border: 1px solid var(--border); border-radius: 13px;
+  background: var(--surface); padding: 10px 11px; margin-bottom: 9px;
+  cursor: pointer; transition: border-color .2s ease;
+}
+.rt-item:hover { border-color: var(--border-2); }
+.rt-item.off { opacity: .5; }
+.rt-item.editing { cursor: default; border-color: var(--primary); }
+.rt-top { display: flex; align-items: center; gap: 8px; }
+.rt-time {
+  font-family: 'JetBrains Mono', monospace; font-size: 13px;
+  font-weight: 700; color: var(--primary-soft); flex-shrink: 0;
+}
+.rt-task {
+  font-size: 12.5px; color: var(--body-text); line-height: 1.5; margin-top: 5px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.rt-last { font-size: 10.5px; color: var(--muted); margin-top: 5px; font-family: 'JetBrains Mono', monospace; }
+.rt-actions { margin-left: auto; display: flex; gap: 4px; flex-shrink: 0; }
+.rt-edit input, .rt-edit textarea {
+  width: 100%; background: var(--deep); border: 1px solid var(--border-2);
+  border-radius: 9px; padding: 7px 9px; color: var(--text);
+  font-family: inherit; font-size: 12.5px; outline: none;
+}
+.rt-edit input:focus, .rt-edit textarea:focus { border-color: var(--primary); }
+.rt-edit textarea { resize: vertical; min-height: 62px; margin-top: 7px; line-height: 1.5; }
+.rt-edit .rt-times { display: flex; gap: 7px; align-items: center; }
+.rt-edit .rt-times input { width: 62px; text-align: center; font-family: 'JetBrains Mono', monospace; }
+.rt-mini {
+  border: 1px solid var(--border-2); background: transparent; color: var(--body-text);
+  border-radius: 9px; padding: 5px 11px; font-size: 11.5px; cursor: pointer;
+  font-family: inherit; transition: all .2s ease;
+}
+.rt-mini:hover { border-color: var(--primary); color: var(--primary); }
+.rt-mini.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
+.rt-mini.danger:hover { border-color: #5C2B2E; color: var(--danger); }
+.rt-err { font-size: 11.5px; color: var(--danger); margin-top: 7px; line-height: 1.5; }
+
+/* ── rail phải: Kết nối ─────────────────────────────────────────────────── */
+.cn-block {
+  border: 1px solid var(--border); border-radius: 13px;
+  background: var(--surface); padding: 11px 12px; margin-bottom: 10px;
+}
+.cn-head { display: flex; align-items: center; gap: 8px; }
+.cn-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+.cn-dot.ok { background: var(--ok); box-shadow: 0 0 9px rgba(126,224,168,.85); }
+.cn-dot.bad { background: var(--danger); box-shadow: 0 0 9px rgba(255,138,128,.7); }
+.cn-name { font-size: 13px; font-weight: 800; color: var(--text); }
+.cn-rows { margin-top: 9px; display: flex; flex-direction: column; gap: 6px; }
+.cn-row { display: flex; gap: 8px; font-size: 11.5px; line-height: 1.5; }
+.cn-k { color: var(--muted); flex-shrink: 0; min-width: 68px; }
+.cn-v { color: var(--body-text); overflow-wrap: anywhere; }
+.cn-v.mono { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent); }
+.cn-warn {
+  border: 1px solid #5C2B2E; background: #2A1215; border-radius: 13px;
+  padding: 10px 12px; margin-bottom: 10px;
+  font-size: 11.5px; color: var(--danger); line-height: 1.55;
+}
+.cn-note { font-size: 11px; color: var(--muted); line-height: 1.55; padding: 2px; }
 
 /* ── dashboard (chọn Alice) ─────────────────────────────────────────────── */
 .dash {
@@ -278,6 +383,28 @@ body {
   font-family: 'JetBrains Mono', monospace; font-size: 10px;
   color: var(--muted); text-align: right; margin-top: 5px;
 }
+
+/* Nút xoá một tin — chỉ hiện khi rê chuột lên đúng bong bóng đó. Hiện thường trực
+   thì mỗi tin mọc một dấu ✕ và khung chat trông như một danh sách việc cần dọn. */
+/* Neo vào BONG BÓNG chứ không vào `.row`: `.row` trải hết bề ngang khung chat, nên
+   neo vào nó thì dấu ✕ của một tin ngắn nằm cách tin đó nửa màn hình. */
+.bubble { position: relative; }
+.msg-x {
+  position: absolute; top: -9px; right: -9px;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--border-2); background: var(--surface);
+  color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity .18s ease, color .18s ease, border-color .18s ease;
+  font-family: inherit; padding: 0;
+}
+.row:hover .msg-x { opacity: 1; pointer-events: auto; }
+.msg-x:hover { color: var(--danger); border-color: #5C2B2E; background: #2A1215; }
+/* Bong bóng của Bệ hạ nằm sát mép phải khung chat — đổi sang mép trái để dấu ✕
+   không bị cắt mất một nửa. */
+.row.mine .msg-x { right: auto; left: -9px; }
+/* Bong bóng đang chảy chữ thì chưa có id để xoá — giấu nút đi. */
+.bubble.live .msg-x { display: none; }
 .row.mine .bubble .meta { color: rgba(18,27,66,.6); }
 
 .bubble p { margin: 0 0 .55em; }

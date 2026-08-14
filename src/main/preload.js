@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('alice', {
   aliceSetModel: (id, model) => ipcRenderer.invoke('alice:alice:set-model', id, model),
   aliceSetProvider: (id, provider) => ipcRenderer.invoke('alice:alice:set-provider', id, provider),
   claudeStatus: (id) => ipcRenderer.invoke('alice:claude:status', id),
+  // Panel "Kết nối" bên phải: provider, model, trạng thái đăng nhập / chìa khoá.
+  connectionInfo: (id) => ipcRenderer.invoke('alice:connection:info', id),
   claudeLogin: (id) => ipcRenderer.invoke('alice:claude:login', id),
   brainOpen: (id) => ipcRenderer.invoke('alice:brain:open', id),
   pickFolder: () => ipcRenderer.invoke('alice:folder:pick'),
@@ -65,6 +67,7 @@ contextBridge.exposeInMainWorld('alice', {
 
   // Cuộc trò chuyện + lịch hẹn + tắt hẳn.
   clearChat: () => ipcRenderer.invoke('alice:chat:clear'),
+  removeMessage: (id) => ipcRenderer.invoke('alice:message:remove', id),
   schedList: () => ipcRenderer.invoke('alice:sched:list'),
   schedAdd: (data) => ipcRenderer.invoke('alice:sched:add', data),
   schedUpdate: (id, patch) => ipcRenderer.invoke('alice:sched:update', id, patch),

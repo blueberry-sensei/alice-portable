@@ -174,6 +174,22 @@ class Store {
     ).run(Date.now(), convId);
   }
 
+  /**
+   * Xoá ĐÚNG MỘT tin khỏi kho. Trigger `messages_ad` dọn luôn bản ghi FTS, nên
+   * tin đã xoá cũng biến khỏi ô tìm kiếm.
+   *
+   * Chỉ đụng tới kho của app. Session engine đang chạy vẫn còn nhớ câu này trong
+   * cửa sổ ngữ cảnh của nó tới lần xoay session kế tiếp — chỗ gọi phải nói rõ
+   * điều đó với người dùng, đừng để họ tưởng Alice đã quên.
+   *
+   * `convId` bắt buộc: chặn một id lạc từ renderer xoá nhầm tin của cuộc khác.
+   */
+  removeMessage(convId, id) {
+    const res = this.db.prepare('DELETE FROM messages WHERE id = ? AND conv_id = ?')
+      .run(Number(id), convId);
+    return Number(res.changes) > 0;
+  }
+
   // ── lịch hẹn (scheduler) ────────────────────────────────────────────────
 
   listSchedules() {

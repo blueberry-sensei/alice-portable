@@ -37,6 +37,9 @@ if (!window.alice) {
     aliceSetProvider: async () => ({ ok: true }),
     claudeStatus: async () => ({ loggedIn: false }),
     claudeLogin: async () => ({ ok: true }),
+    connectionInfo: async () => ({ provider: 'opencode', model: null, warning: null,
+      opencode: { configured: false, keys: [], available: false, binary: null } }),
+    removeMessage: async () => ({ ok: true }),
     brainOpen: async () => ({ error: 'chế độ xem thử' }),
     pickFolder: async () => ({ canceled: true }),
     testApiKey: async () => ({ error: 'chế độ xem thử' }),
@@ -96,6 +99,11 @@ function showChat() {
   inChat = true;
   $('view-dashboard').hidden = true;
   $('view-chat').hidden = false;
+  // Hai rail là của Alice ĐANG MỞ — nạp lại mỗi lần vào màn chat, không nạp nền
+  // theo chu kỳ (xem chú thích ở `alice:connection:info`).
+  editingSchedId = null;
+  renderRoutines();
+  renderConnection();
 }
 
 /** Dashboard — danh sách các Alice: ảnh, tên, thư mục, tình trạng. */
@@ -252,7 +260,12 @@ function clock(ts) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-function addMessage(role, text, { ts = null, error = false } = {}) {
+/**
+ * @param {number?} id  id trong kho của app. Có id thì bong bóng mọc nút ✕ xoá.
+ *   Bong bóng lỗi và bong bóng đang chảy chữ không có id — chúng chưa (hoặc không)
+ *   nằm trong kho, nên không có gì để xoá.
+ */
+function addMessage(role, text, { ts = null, error = false, id = null } = {}) {
   const hello = $('hello');
   if (hello) hello.remove();
 
@@ -280,11 +293,34 @@ function addMessage(role, text, { ts = null, error = false } = {}) {
   meta.className = 'meta';
   meta.textContent = clock(ts) + (role === 'human' ? ' ✓✓' : '');
   bubble.appendChild(meta);
+  if (id != null && !error) attachDelete(bubble, row, id);
   row.appendChild(bubble);
 
   feed.appendChild(row);
   scrollDown();
   return bubble;
+}
+
+/** Nút ✕ trên một bong bóng — xoá tin khỏi kho của app. */
+function attachDelete(bubble, row, id) {
+  const x = document.createElement('button');
+  x.className = 'msg-x';
+  x.textContent = '✕';
+  x.title = 'Xoá tin nhắn này';
+  x.onclick = async (e) => {
+    e.stopPropagation();
+    if (!confirm(
+      'Xoá tin nhắn này khỏi lịch sử?\n\n'
+      + 'Nó biến mất khỏi màn hình và khỏi ô tìm kiếm, không lấy lại được.\n'
+      + 'Lưu ý: Alice vẫn còn nhớ câu này trong phiên đang chạy, tới lần xoay phiên kế tiếp.'
+    )) return;
+    const r = await window.alice.removeMessage(id);
+    if (r && r.error) { alert(r.error); return; }
+    row.remove();
+    // Xoá tin cuối cùng → trả lại màn hình chào, không để khung chat trống trơn.
+    if (!feed.querySelector('.row')) await loadHistory();
+  };
+  bubble.appendChild(x);
 }
 
 function scrollDown() {
@@ -356,7 +392,8 @@ async function send() {
 
   input.value = '';
   autoGrow();
-  addMessage('human', text);
+  // Id chỉ biết được SAU khi main lưu xong — giữ lại bong bóng để gắn nút xoá vào.
+  const mineBubble = addMessage('human', text);
   setBusy(true);
   showTyping();
   liveBubble = null;
@@ -388,8 +425,12 @@ async function send() {
     meta.className = 'meta';
     meta.textContent = clock();
     existing.appendChild(meta);
+    if (res.replyId != null) attachDelete(existing, existing.closest('.row'), res.replyId);
   } else {
-    addMessage('alice', res.text || '(Alice không trả lời gì)');
+    addMessage('alice', res.text || '(Alice không trả lời gì)', { id: res.replyId });
+  }
+  if (mineBubble && res.messageId != null) {
+    attachDelete(mineBubble, mineBubble.closest('.row'), res.messageId);
   }
 
   refreshStatusLine(res);
@@ -606,9 +647,12 @@ async function openCreateAlice(required = false) {
           setPinned('Đang chờ đăng nhập Claude', 'Đăng nhập xong ở trình duyệt thì quay lại app, vào Cài đặt để kiểm tra trạng thái.');
         }
         if (!lr.error) {
-          pollClaudeLogin(r.alice.id, (st) => {
-            setPinned('Đã đăng nhập Claude',
-              `Xong rồi — <b>${escapeHtml(st.email || '')}</b> (${escapeHtml(st.subscriptionType || '')}). Chat được luôn.`);
+          // Đăng nhập xong: gỡ pin và để panel Kết nối bên phải nói thay — chấm
+          // xanh + email + gói ở đó đã đủ, một dòng pin "xong rồi, chat được luôn"
+          // chỉ chiếm chỗ rồi nằm lại mãi (Bệ hạ chốt 2026-08-14).
+          pollClaudeLogin(r.alice.id, () => {
+            $('pinned').hidden = true;
+            renderConnection();
           });
         }
       }
@@ -671,14 +715,9 @@ async function openSettings() {
       <div class="desc" id="s-brain-desc">Dashboard đầy đủ: model trích xuất tri thức, embedding, đồ thị tri thức, telemetry.</div>
     </div>
     <div class="field">
-      <label>Lịch hẹn</label>
-      <button class="btn ghost" id="s-sched" style="width:100%; padding:9px 14px; font-size:12.5px">Quản lý lịch hẹn…</button>
-      <div class="desc">Đặt giờ để Alice tự làm một việc mỗi ngày (kể cả khi cửa sổ đang thu nhỏ).</div>
-    </div>
-    <div class="field">
       <label>Cuộc trò chuyện</label>
       <button class="btn ghost" id="s-clear" style="width:100%; padding:9px 14px; font-size:12.5px">Xoá cuộc trò chuyện này…</button>
-      <div class="desc">Xoá hết những gì đã nói với Alice này. Không lấy lại được.</div>
+      <div class="desc">Xoá hết những gì đã nói với Alice này. Không lấy lại được. Muốn xoá lẻ một tin thì rê chuột lên tin đó trong khung chat.</div>
     </div>
   `, async () => {
     if (provider === 'opencode') {
@@ -695,6 +734,7 @@ async function openSettings() {
       await window.alice.aliceSetModel(status.active, model);
     }
     await refreshHeader();
+    renderConnection(); // model vừa đổi — panel bên phải phải nói đúng model mới
   });
 
   loadModelsInto($('f-model'), $('f-model-desc'), currentModel);
@@ -749,16 +789,7 @@ async function openSettings() {
     desc.textContent = 'Đã mở trong trình duyệt. Lần đầu mở của Alice này thì tự tạo một tài khoản LOCAL trên đúng trang login.';
   };
 
-  $('s-sched').onclick = openSchedules;
-
-  $('s-clear').onclick = async () => {
-    if (!confirm('Xoá hết cuộc trò chuyện này? Alice sẽ không còn nhớ gì đã nói, và không lấy lại được.')) return;
-    await window.alice.clearChat();
-    const hello = $('hello');
-    feed.innerHTML = '';
-    if (hello) feed.appendChild(hello);
-    await refreshHeader();
-  };
+  $('s-clear').onclick = clearChat;
 
   $('s-pick').onclick = async () => {
     const r = await window.alice.pickAvatar();
@@ -1086,78 +1117,245 @@ async function loadModelsInto(selectEl, descEl, selectedModel) {
   descEl.textContent = `${info.models.length} model khả dụng — duyệt từ opencode lúc mở panel.`;
 }
 
-/** Màn hình lịch hẹn — Alice tự làm một việc vào giờ đã đặt, mỗi ngày một lần.
- * Chạy được khi Alice ĐANG MỞ (kể cả khi cửa sổ thu nhỏ). */
-async function openSchedules() {
-  openSheet('Lịch hẹn', 'Đặt giờ, Alice tự làm việc đó mỗi ngày (khi Alice đang mở). Kết quả hiện ngay trong cuộc trò chuyện.', `
-    <div class="field">
-      <label>Thêm lịch mới</label>
-      <div style="display:flex; gap:8px">
-        <input id="sd-hour" type="number" min="0" max="23" placeholder="Giờ (0–23)" style="width:110px">
-        <input id="sd-minute" type="number" min="0" max="59" placeholder="Phút (0–59)" style="width:110px">
-      </div>
-      <input id="sd-task" type="text" placeholder="Việc cần làm, ví dụ: Tóm tắt hôm nay rồi gợi ý việc mai" style="margin-top:8px">
-      <div id="sd-msg" class="desc"></div>
-      <div style="display:flex; gap:8px; margin-top:8px">
-        <button class="btn" id="sd-add" style="padding:8px 16px; font-size:12.5px">Thêm</button>
-      </div>
-    </div>
-    <div class="field">
-      <label>Lịch đang có</label>
-      <div id="sd-list"></div>
-    </div>
-  `, null);
-  $('sheet-save').hidden = true;
-  $('sheet-close').textContent = 'Đóng';
+/** Xoá cả cuộc trò chuyện — gọi từ nút 🗑 trên header và từ Cài đặt. */
+async function clearChat() {
+  if (!confirm(
+    'Xoá hết cuộc trò chuyện này?\n\n'
+    + 'Toàn bộ tin nhắn biến mất khỏi lịch sử và khỏi ô tìm kiếm, không lấy lại được.\n'
+    + 'Alice bắt đầu lại từ đầu ở lượt kế tiếp.'
+  )) return;
+  await window.alice.clearChat();
+  const hello = $('hello');
+  feed.innerHTML = '';
+  if (hello) feed.appendChild(hello);
+  await refreshHeader();
+}
 
-  const listEl = $('sd-list');
-  const renderList = async () => {
-    const rows = await window.alice.schedList();
-    listEl.innerHTML = rows.length
-      ? rows.map((s) => {
-          const hh = String(s.hour).padStart(2, '0');
-          const mm = String(s.minute).padStart(2, '0');
-          const last = s.last_run ? ` · đã chạy ${s.last_run}` : '';
-          return `<div class="tx-item">
-            <div class="tx-who">${hh}:${mm} mỗi ngày${last}</div>
-            <div class="tx-text">${escapeHtml(s.task)}</div>
-            <div class="tx-meta">
-              <label style="font-size:11px; color:var(--body-text)">
-                <input type="checkbox" id="sd-on-${s.id}" data-id="${s.id}" ${s.enabled ? 'checked' : ''}> Bật
-              </label>
-              <button class="btn ghost" id="sd-del-${s.id}" data-id="${s.id}" style="margin-left:10px; padding:4px 10px; font-size:11px">Xoá</button>
-            </div>
-          </div>`;
-        }).join('')
-      : 'Chưa có lịch nào. Thêm một lịch ở trên.';
-    for (const el of listEl.querySelectorAll('[data-id]')) {
-      const id = Number(el.dataset.id);
-      if (el.type === 'checkbox') {
-        el.onchange = async () => { await window.alice.schedUpdate(id, { enabled: el.checked }); };
-      } else {
-        el.onclick = async () => {
-          if (!confirm('Xoá lịch hẹn này?')) return;
-          await window.alice.schedRemove(id);
-          await renderList();
-        };
-      }
+// ── rail trái: Routine ─────────────────────────────────────────────────────
+
+/**
+ * Lịch chạy của Alice, đặt THẲNG ngoài màn chat.
+ *
+ * Trước đây nó nằm sau hai lớp: Cài đặt → "Quản lý lịch hẹn…". Một thứ chạy nền
+ * mỗi ngày mà phải bấm hai lần mới thấy thì không ai kiểm tra nó, và một lịch tắt
+ * âm thầm hay một lịch chưa chạy lần nào sẽ không ai phát hiện. Ở đây nó luôn
+ * trong tầm mắt và sửa được tại chỗ.
+ */
+let editingSchedId = null; // lịch đang mở ô sửa — chỉ một lúc một cái
+
+async function renderRoutines() {
+  const listEl = $('rt-list');
+  if (!listEl) return;
+  let rows;
+  try {
+    rows = await window.alice.schedList();
+  } catch (err) {
+    listEl.innerHTML = `<div class="rail-empty">Không đọc được lịch: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  if (!rows.length && editingSchedId !== 'new') {
+    listEl.innerHTML = '<div class="rail-empty">Chưa có lịch nào.<br>Bấm <b>＋</b> ở trên để Alice tự làm một việc vào giờ cố định mỗi ngày.</div>';
+    return;
+  }
+
+  const editor = (s) => {
+    const hh = s ? String(s.hour).padStart(2, '0') : '';
+    const mm = s ? String(s.minute).padStart(2, '0') : '';
+    return `<div class="rt-edit">
+      <div class="rt-times">
+        <input class="rt-h" type="number" min="0" max="23" placeholder="giờ" value="${escapeHtml(hh)}">
+        <span style="color:var(--muted)">:</span>
+        <input class="rt-m" type="number" min="0" max="59" placeholder="phút" value="${escapeHtml(mm)}">
+      </div>
+      <textarea class="rt-t" placeholder="Việc cần làm, ví dụ: Tóm tắt hôm nay rồi gợi ý việc mai">${escapeHtml(s ? s.task : '')}</textarea>
+      <div class="rt-err" hidden></div>
+      <div class="rail-actions">
+        <button class="rt-mini primary rt-save">Lưu</button>
+        <button class="rt-mini rt-cancel">Huỷ</button>
+        ${s ? '<button class="rt-mini danger rt-del" style="margin-left:auto">Xoá</button>' : ''}
+      </div>
+    </div>`;
+  };
+
+  const parts = [];
+  if (editingSchedId === 'new') {
+    parts.push(`<div class="rt-item editing" data-id="new">${editor(null)}</div>`);
+  }
+  for (const s of rows) {
+    if (editingSchedId === s.id) {
+      parts.push(`<div class="rt-item editing" data-id="${s.id}">${editor(s)}</div>`);
+      continue;
     }
-  };
-  await renderList();
+    const hh = String(s.hour).padStart(2, '0');
+    const mm = String(s.minute).padStart(2, '0');
+    parts.push(`<div class="rt-item${s.enabled ? '' : ' off'}" data-id="${s.id}" title="Bấm để sửa">
+      <div class="rt-top">
+        <span class="rt-time">${hh}:${mm}</span>
+        <div class="rt-actions">
+          <button class="rail-btn rt-toggle" data-on="${s.id}" title="${s.enabled ? 'Đang bật — bấm để tắt' : 'Đang tắt — bấm để bật'}">${s.enabled ? '⏸' : '▶'}</button>
+        </div>
+      </div>
+      <div class="rt-task">${escapeHtml(s.task)}</div>
+      <div class="rt-last">${s.last_run ? `chạy lần cuối ${escapeHtml(s.last_run)}` : 'chưa chạy lần nào'}</div>
+    </div>`);
+  }
+  listEl.innerHTML = parts.join('');
 
-  $('sd-add').onclick = async () => {
-    const r = await window.alice.schedAdd({
-      hour: $('sd-hour').value,
-      minute: $('sd-minute').value,
-      task: $('sd-task').value,
-    });
-    if (r.error) { $('sd-msg').textContent = r.error; return; }
-    $('sd-hour').value = '';
-    $('sd-minute').value = '';
-    $('sd-task').value = '';
-    $('sd-msg').textContent = 'Đã thêm.';
-    await renderList();
+  // Bật/tắt — chặn nổi bọt, không thì bấm nút này cũng mở luôn ô sửa.
+  for (const b of listEl.querySelectorAll('[data-on]')) {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const s = rows.find((x) => String(x.id) === b.dataset.on);
+      await window.alice.schedUpdate(Number(b.dataset.on), { enabled: !s.enabled });
+      await renderRoutines();
+    };
+  }
+  for (const item of listEl.querySelectorAll('.rt-item:not(.editing)')) {
+    item.onclick = async () => {
+      editingSchedId = Number(item.dataset.id);
+      await renderRoutines();
+    };
+  }
+
+  const box = listEl.querySelector('.rt-item.editing');
+  if (!box) return;
+  const idNow = box.dataset.id;
+  const errEl = box.querySelector('.rt-err');
+  box.querySelector('.rt-t').focus();
+
+  box.querySelector('.rt-cancel').onclick = async () => {
+    editingSchedId = null;
+    await renderRoutines();
   };
+  box.querySelector('.rt-save').onclick = async () => {
+    const patch = {
+      hour: box.querySelector('.rt-h').value,
+      minute: box.querySelector('.rt-m').value,
+      task: box.querySelector('.rt-t').value,
+    };
+    const r = idNow === 'new'
+      ? await window.alice.schedAdd(patch)
+      : await window.alice.schedUpdate(Number(idNow), patch);
+    if (r && r.error) {
+      errEl.hidden = false;
+      errEl.textContent = r.error;
+      return;
+    }
+    editingSchedId = null;
+    await renderRoutines();
+  };
+  const del = box.querySelector('.rt-del');
+  if (del) {
+    del.onclick = async () => {
+      if (!confirm('Xoá lịch hẹn này?')) return;
+      await window.alice.schedRemove(Number(idNow));
+      editingSchedId = null;
+      await renderRoutines();
+    };
+  }
+}
+
+// ── rail phải: Kết nối ─────────────────────────────────────────────────────
+
+/**
+ * Trạng thái kết nối của Alice đang mở.
+ *
+ * CỐ Ý không có "quota còn lại": dò thật 2026-08-14, cả `claude` lẫn `opencode`
+ * đều không có lệnh nào trả về con số đó. Bệ hạ chốt — thấy chấm xanh là biết nối
+ * được, thế là đủ; và nhờ vậy dòng "Đã đăng nhập Claude… chat được luôn" trong
+ * thanh pin cũng không cần tồn tại nữa.
+ */
+async function renderConnection() {
+  const el = $('cn-body');
+  if (!el) return;
+  const st = await window.alice.status();
+  if (!st.active) {
+    el.innerHTML = '<div class="rail-empty">Chưa mở Alice nào.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="rail-empty">Đang kiểm tra…</div>';
+
+  let info;
+  try {
+    info = await window.alice.connectionInfo(st.active);
+  } catch (err) {
+    el.innerHTML = `<div class="cn-warn">Không kiểm tra được: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  if (info.error) {
+    el.innerHTML = `<div class="cn-warn">${escapeHtml(info.error)}</div>`;
+    return;
+  }
+
+  const row = (k, v, mono = false) =>
+    `<div class="cn-row"><span class="cn-k">${escapeHtml(k)}</span><span class="cn-v${mono ? ' mono' : ''}">${escapeHtml(v)}</span></div>`;
+
+  const parts = [];
+  if (info.warning) parts.push(`<div class="cn-warn">${escapeHtml(info.warning)}</div>`);
+
+  if (info.provider === 'claude') {
+    const c = info.claude || {};
+    parts.push(`<div class="cn-block">
+      <div class="cn-head"><span class="cn-dot ${c.loggedIn ? 'ok' : 'bad'}"></span><span class="cn-name">Claude Code</span></div>
+      <div class="cn-rows">
+        ${c.loggedIn ? row('Tài khoản', c.email || '(không rõ)') : ''}
+        ${c.loggedIn ? row('Gói', c.subscriptionType || '(không rõ)') : ''}
+        ${c.loggedIn && c.orgName ? row('Tổ chức', c.orgName) : ''}
+        ${c.loggedIn ? '' : row('Trạng thái', c.error || 'Chưa đăng nhập')}
+      </div>
+      ${c.loggedIn ? '' : '<div class="rail-actions"><button class="rt-mini primary" id="cn-login">Đăng nhập Claude…</button></div>'}
+    </div>`);
+  } else {
+    const o = info.opencode || {};
+    const keys = (o.keys || []).filter((k) => k.tail);
+    parts.push(`<div class="cn-block">
+      <div class="cn-head"><span class="cn-dot ${o.configured && o.available ? 'ok' : 'bad'}"></span><span class="cn-name">opencode</span></div>
+      <div class="cn-rows">
+        ${keys.length
+          ? keys.map((k) => row(k.provider, `••••${k.tail}`, true)).join('')
+          : row('Chìa khoá', 'chưa có — vào Cài đặt dán chìa khoá')}
+        ${row('Phần chạy', o.available ? (o.binary || 'sẵn sàng') : 'thiếu binary opencode')}
+      </div>
+    </div>`);
+  }
+
+  parts.push(`<div class="cn-block">
+    <div class="cn-head"><span class="cn-dot ${info.model ? 'ok' : ''}"></span><span class="cn-name">Model</span></div>
+    <div class="cn-rows">
+      ${row('Đang dùng', info.model || 'mặc định của engine', true)}
+    </div>
+  </div>`);
+
+  parts.push('<div class="cn-note">Số quota còn lại không hiện ở đây: cả <code>claude</code> lẫn '
+    + '<code>opencode</code> đều không có lệnh nào trả về con số đó. Chấm xanh nghĩa là kết nối dùng được.</div>');
+
+  el.innerHTML = parts.join('');
+
+  const loginBtn = $('cn-login');
+  if (loginBtn) {
+    loginBtn.onclick = async () => {
+      loginBtn.disabled = true;
+      loginBtn.textContent = 'Đang mở trình duyệt…';
+      const lr = await window.alice.claudeLogin(st.active);
+      if (lr.error) {
+        setPinned('Không mở được đăng nhập Claude', escapeHtml(lr.error), true);
+      } else if (lr.url) {
+        setPinned('Đăng nhập Claude',
+          `Máy không tự mở được trình duyệt — bấm link này: <a href="${escapeHtml(lr.url)}" target="_blank" rel="noreferrer">${escapeHtml(lr.url)}</a>`,
+          true);
+      }
+      if (!lr.error) {
+        // Đăng nhập xong thì chấm chuyển xanh — không cần một dòng pin báo "xong rồi"
+        // nữa, đó chính là dòng Bệ hạ bảo bỏ.
+        await pollClaudeLogin(st.active, () => {
+          $('pinned').hidden = true;
+          renderConnection();
+        });
+      }
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Đăng nhập Claude…';
+    };
+  }
 }
 
 /** Màn hình chẩn đoán: nhật ký lỗi (file trên đĩa, hiển thị đuôi) + transcript
@@ -1319,7 +1517,7 @@ async function loadHistory() {
     if (hello) feed.appendChild(hello);
     return;
   }
-  for (const r of rows) addMessage(r.role, r.text, { ts: r.ts });
+  for (const r of rows) addMessage(r.role, r.text, { ts: r.ts, id: r.id });
 }
 
 sendBtn.addEventListener('click', send);
@@ -1330,6 +1528,17 @@ input.addEventListener('keydown', (e) => {
 });
 $('btn-settings').addEventListener('click', openSettings);
 $('btn-debug').addEventListener('click', openDebug);
+$('btn-clear').addEventListener('click', clearChat);
+$('rt-add').addEventListener('click', async () => {
+  editingSchedId = 'new';
+  await renderRoutines();
+});
+$('cn-reload').addEventListener('click', async () => {
+  const b = $('cn-reload');
+  b.disabled = true;
+  await renderConnection();
+  b.disabled = false;
+});
 $('btn-back').addEventListener('click', () => { showDashboard(); });
 $('btn-add-alice').addEventListener('click', () => openCreateAlice(false));
 $('dash-add').addEventListener('click', () => openCreateAlice(false));
@@ -1399,6 +1608,9 @@ window.alice.onAliceChanged(async (payload) => {
   await refreshHeader();
   if (inChat) {
     await loadHistory(); // đổi Alice từ switcher/Settings → nạp lịch sử mới
+    editingSchedId = null;
+    renderRoutines();    // lịch hẹn và kết nối là của RIÊNG Alice — nạp lại cả hai
+    renderConnection();
   } else {
     renderDashboard();   // đổi từ nơi khác khi đang ở dashboard → cập nhật card
   }
@@ -1423,7 +1635,7 @@ window.alice.onBusy((msg) => {
 // đúng Alice đang mở mới gửi sự kiện này, nên ở đây chỉ cần đang ở màn chat.
 window.alice.onPublicMessage(({ message }) => {
   if (!inChat || !message) return;
-  addMessage(message.role, message.text, { ts: message.ts });
+  addMessage(message.role, message.text, { ts: message.ts, id: message.id });
 });
 
 // Khách gõ @alice trên trang public — vẽ đúng ba chấm nhấp nháy trong app, y hệt

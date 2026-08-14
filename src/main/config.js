@@ -126,16 +126,47 @@ const DEFAULTS = {
 
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
 
+/**
+ * `settings.model` KHÔNG còn tồn tại — dọn hẳn khỏi file khi gặp.
+ *
+ * Bản một-Alice từng có "model toàn cục" nằm ở đây. Bản đa-Alice chuyển model về
+ * cho RIÊNG từng Alice (`alices.json`), nhưng giá trị cũ vẫn nằm lại trong
+ * `settings.json` của máy đã chạy bản trước — và vẫn được đẩy xuống engine. Hệ quả
+ * đo thật 2026-08-14: một Alice cấu hình `provider=claude, model=claude-sonnet-5`
+ * gọi ra `claude --model opencode/deepseek-v4-flash` rồi ăn nguyên câu lỗi thô của
+ * CLI ("It looks like there's an issue with the selected model…"), trong khi thanh
+ * tiêu đề vẫn hiển thị đúng `claude-sonnet-5`.
+ *
+ * Vá từng chỗ đọc là vá triệu chứng — chỗ thứ tư (`alice.js`) đã sống sót qua đúng
+ * một lần vá như vậy. Gỡ khỏi NGUỒN thì không còn chỗ nào rò được nữa.
+ */
+function stripLegacyModel(raw) {
+  if (!raw || typeof raw !== 'object' || !('model' in raw)) return false;
+  delete raw.model;
+  return true;
+}
+
 function loadSettings() {
+  let raw;
   try {
-    const raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
-    return { ...DEFAULTS, ...raw, brain: { ...DEFAULTS.brain, ...(raw.brain || {}) } };
+    raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
   } catch {
     return { ...DEFAULTS, brain: { ...DEFAULTS.brain } };
   }
+  if (stripLegacyModel(raw)) {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(raw, null, 2), 'utf8');
+    } catch {
+      // Đĩa chỉ-đọc / thiếu quyền: đã gỡ khỏi bộ nhớ là đủ an toàn cho lượt chạy này.
+    }
+  }
+  return { ...DEFAULTS, ...raw, brain: { ...DEFAULTS.brain, ...(raw.brain || {}) } };
 }
 
 function saveSettings(next) {
+  // Chặn cả đường quay lại: một patch từ UI cũ vẫn có thể mang theo `model`.
+  stripLegacyModel(next);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(next, null, 2), 'utf8');
   return next;

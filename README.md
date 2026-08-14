@@ -122,7 +122,14 @@ Một app Alice có thể chứa **nhiều Alice** — ví dụ *Alice GoDine* c
 | Xuống dòng | **Shift + Enter** |
 | Dừng khi Alice đang trả lời | Bấm nút tròn bên phải (nó đang là nút vuông ■) |
 | Tìm lại chuyện cũ | Bấm **⌕** trên cùng. Gõ không dấu vẫn tìm ra |
+| Xoá một tin nhắn | Rê chuột lên tin đó, bấm **✕** ở góc bong bóng |
+| Xoá cả cuộc trò chuyện | Bấm **🗑** trên cùng |
+| Xem / sửa lịch chạy hằng ngày | Cột **Routine** bên trái. Bấm vào một lịch là sửa được ngay tại chỗ |
+| Xem đang nối với tài khoản nào | Cột **Kết nối** bên phải. Chấm xanh là dùng được |
 | Đổi ảnh Alice, đổi model | Bấm **⚙** trên cùng |
+
+> Xoá tin chỉ xoá trong kho của app. Alice vẫn còn nhớ câu đó trong phiên đang chạy,
+> tới lần app tự xoay phiên kế tiếp.
 
 Alice nhớ hết những gì đã nói, kể cả sau khi tắt app. Khi cuộc trò chuyện dài quá,
 Alice tự tóm tắt phần cũ và nhớ tiếp — bạn không phải làm gì.

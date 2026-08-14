@@ -38,8 +38,19 @@
       <div class="dash-grid" id="dash-grid"></div>
     </div>
 
-    <!-- Chat: giao diện trò chuyện của Alice đang mở -->
-    <div class="chat" id="view-chat" hidden>
+    <!-- Chat: ba cột — Routine bên trái, cuộc trò chuyện ở giữa, Kết nối bên phải.
+         Hai rail chỉ sống trong màn chat; Dashboard vẫn một cột như cũ. -->
+    <div class="stage" id="view-chat" hidden>
+
+      <aside class="rail rail-left">
+        <div class="rail-head">
+          <span class="rail-title">Routine</span>
+          <button class="rail-btn" id="rt-add" title="Thêm lịch chạy">＋</button>
+        </div>
+        <div class="rail-body" id="rt-list"></div>
+      </aside>
+
+      <div class="chat">
       <div class="head">
         <button class="icon-btn" id="btn-back" title="Về danh sách Alice">‹</button>
         <!-- Ảnh nạp bằng JS (data URI) chứ không đặt src sẵn: ảnh của người dùng
@@ -58,6 +69,7 @@
           <div class="sub" id="subtitle">đang khởi động…</div>
         </div>
         <button class="icon-btn" id="btn-search" title="Tìm trong lịch sử chat">⌕</button>
+        <button class="icon-btn" id="btn-clear" title="Xoá cuộc trò chuyện này">🗑</button>
         <button class="icon-btn" id="btn-debug" title="Nhật ký lỗi & chẩn đoán">⚠</button>
         <button class="icon-btn" id="btn-settings" title="Cài đặt">⚙</button>
       </div>
@@ -85,6 +97,16 @@
         </div>
         <button class="send" id="send" title="Gửi (Enter)">➤</button>
       </div>
+      </div>
+
+      <aside class="rail rail-right">
+        <div class="rail-head">
+          <span class="rail-title">Kết nối</span>
+          <button class="rail-btn" id="cn-reload" title="Kiểm tra lại">⟳</button>
+        </div>
+        <div class="rail-body" id="cn-body"></div>
+      </aside>
+
     </div>
   </div>
 

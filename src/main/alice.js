@@ -85,7 +85,16 @@ function buildAgentsMd(knowledgeDir) {
  * `command` là đường dẫn tuyệt đối tới runtime NHÚNG — không `npx`, không `python`
  * trần trên PATH (`D-0053` mục 3).
  */
-function buildOpencodeJson(settings, { brainMcp = null } = {}) {
+/**
+ * `model` là của RIÊNG Alice đang mở và phải được TRUYỀN VÀO — không đọc lén
+ * `settings.model`.
+ *
+ * Đó chính là chỗ rò thứ tư của bug model mồ côi: ba chỗ đọc kia đã được vá ở
+ * `edc3f4b`, còn dòng này vẫn lặng lẽ ghi model toàn cục cũ vào `opencode.json`
+ * của MỌI workspace, mỗi lần boot. `null` = không ghi gì, để opencode tự xoay
+ * vòng theo `modelPreference`.
+ */
+function buildOpencodeJson(settings, { brainMcp = null, model = null } = {}) {
   const cfg = {
     $schema: 'https://opencode.ai/config.json',
     // Nhắc lại cho rõ: `instructions` trỏ vào AGENTS.md cùng thư mục.
@@ -93,7 +102,7 @@ function buildOpencodeJson(settings, { brainMcp = null } = {}) {
     mcp: {},
   };
   if (brainMcp) cfg.mcp.brain = brainMcp;
-  if (settings.model) cfg.model = settings.model;
+  if (model) cfg.model = model;
   return cfg;
 }
 
@@ -151,14 +160,14 @@ process.stdout.write([
  * `dir` mặc định là workspace chung; public server dùng workspace RIÊNG của từng
  * Alice (`alices/<id>/workspace`) để mỗi máy chủ chạy đúng AGENTS.md + MCP của nó.
  */
-function provisionWorkspace(settings, { brainMcp = null, dir = null } = {}) {
+function provisionWorkspace(settings, { brainMcp = null, dir = null, model = null } = {}) {
   const target = dir || config.workDir();
   fs.mkdirSync(target, { recursive: true });
 
   fs.writeFileSync(path.join(target, 'AGENTS.md'), buildAgentsMd(config.knowledgeDir()), 'utf8');
   fs.writeFileSync(
     path.join(target, 'opencode.json'),
-    JSON.stringify(buildOpencodeJson(settings, { brainMcp }), null, 2),
+    JSON.stringify(buildOpencodeJson(settings, { brainMcp, model }), null, 2),
     'utf8'
   );
 

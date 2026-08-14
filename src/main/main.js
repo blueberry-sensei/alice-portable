@@ -10,6 +10,7 @@ const { Store } = require('./memory/store');
 const { Memory } = require('./memory/memory');
 const { OpencodeEngine } = require('./engine/opencode');
 const { ClaudeEngine } = require('./engine/claude');
+const { modelFor } = require('./engine/model');
 const { execFile } = require('node:child_process');
 const { createTurnRunner } = require('./turn');
 const { provisionWorkspace } = require('./alice');
@@ -51,6 +52,9 @@ let settings = null;
 let busy = false;
 let scheduler = null;  // lịch hẹn của Alice ĐANG MỞ (bảng lịch nằm trong chat db)
 let registry = { active: null, alices: [] };
+// Model cấu hình không hợp với provider của Alice đang mở (xem `engine/model.js`).
+// Giữ lại để panel Kết nối nói ra chỗ sai, thay vì để nó vỡ giữa một lượt chat.
+let modelWarning = null;
 // Alice đang được public làm máy chủ: id → PublicServer (chạy độc lập với
 // Alice đang mở trên màn hình).
 const publicServers = new Map();
@@ -105,10 +109,13 @@ async function ready() {
 function createWindow() {
   win = new BrowserWindow({
     title: config.appName(),
-    width: 1180,
-    height: 820,
-    minWidth: 780,
-    minHeight: 560,
+    // Màn chat là BA cột (Routine · trò chuyện · Kết nối). `minWidth` phải nằm trên
+    // ngưỡng 1180px mà CSS dùng để bỏ hai rail đi, nếu không cửa sổ co xuống mức
+    // tối thiểu là hai rail biến mất mà người dùng không hiểu vì sao.
+    width: 1440,
+    height: 860,
+    minWidth: 1200,
+    minHeight: 600,
     backgroundColor: '#080E1C', // nền DREAM, để lúc mở không loé trắng
     show: false,
     autoHideMenuBar: true,
@@ -250,8 +257,12 @@ async function activateAlice(id) {
   // trước đó, vì đổi Alice có thể đồng thời đổi cả CLASS engine (opencode ↔ claude).
   engine = engineFor(alice, settings);
   engine.setBaseDir(base);
-  // Model là của RIÊNG Alice (chọn lúc tạo, đổi trong Settings của nó).
-  engine.settings = { ...settings, model: alice.model || null };
+  // Model là của RIÊNG Alice (chọn lúc tạo, đổi trong Settings của nó) — và phải đi
+  // qua `modelFor`, chốt chặn không cho model của họ này rơi xuống engine của họ kia.
+  const picked = modelFor(alice);
+  modelWarning = picked.warning;
+  if (picked.warning) log.warn(`model không hợp provider: alice=${alice.id} ${picked.warning}`);
+  engine.settings = { ...settings, model: picked.model };
 
   store = new Store(path.join(base, 'chat.db'));
   memory = new Memory(store, settings, makeSummarizer());
@@ -273,7 +284,13 @@ async function activateAlice(id) {
   // mọi Alice dùng chung `alice-data/workspace`, nên file Alice này tạo ra lại nằm
   // trong tầm với của Alice khác — và người dùng chọn thư mục riêng cho Alice thì
   // nó vẫn đi làm việc ở một nơi hoàn toàn khác.
-  const workDir = provisionWorkspace(settings, { brainMcp, dir: path.join(base, 'workspace') });
+  // Model chỉ có nghĩa với opencode — `opencode.json` là file cấu hình của nó.
+  // Alice chạy Claude Code thì để trống, không nhét tên model Claude vào đó.
+  const workDir = provisionWorkspace(settings, {
+    brainMcp,
+    dir: path.join(base, 'workspace'),
+    model: alice.provider === 'claude' ? null : picked.model,
+  });
 
   runTurn = createTurnRunner({ store, memory, engine, workDir, settings });
   scheduler = new Scheduler({ store, runTurn, log });
@@ -474,9 +491,19 @@ ipcMain.handle('alice:alice:set-model', async (_e, id, model) => {
   if (!updated) return { error: 'Không tìm thấy Alice.' };
   registry = state;
   if (registry.active === id) {
-    engine.settings = { ...engine.settings, model: model || null };
+    const alice = currentAlice();
+    const picked = modelFor(alice);
+    modelWarning = picked.warning;
+    engine.settings = { ...engine.settings, model: picked.model };
+    // `opencode.json` trong workspace cũng mang tên model — không ghi lại thì lượt
+    // sau vẫn chạy model cũ dù ô chọn đã đổi.
+    provisionWorkspace(settings, {
+      brainMcp: brain && brain.available ? brain.mcpConfig() : null,
+      dir: path.join(aliceDirFor(id), 'workspace'),
+      model: alice.provider === 'claude' ? null : picked.model,
+    });
   }
-  return { ok: true };
+  return { ok: true, warning: modelFor(registry.alices.find((a) => a.id === id)).warning };
 });
 
 ipcMain.handle('alice:alice:set-provider', async (_e, id, provider) => {
@@ -495,8 +522,58 @@ ipcMain.handle('alice:alice:set-provider', async (_e, id, provider) => {
 ipcMain.handle('alice:claude:status', async (_e, id) => {
   const alice = registry.alices.find((a) => a.id === id);
   if (!alice) return { error: 'Không tìm thấy Alice.' };
-  const base = aliceDirFor(id);
-  const configDir = registryModule.claudeConfigDir(base);
+  return claudeAuthStatus(id);
+});
+
+/**
+ * Tất cả những gì panel "Kết nối" bên phải cần, trong MỘT lượt gọi.
+ *
+ * Cố ý KHÔNG có con số quota còn lại: đã dò thật 2026-08-14, cả `claude` lẫn
+ * `opencode` đều không có lệnh nào trả về số đó (`/usage` chỉ sống trong phiên
+ * tương tác của Claude Code; `opencode stats` chỉ đếm mức dùng cục bộ). Bịa ra một
+ * con số từ số liệu cục bộ rồi gọi nó là "quota" còn tệ hơn không hiện gì — Bệ hạ
+ * chốt: chỉ cần thấy tích xanh là biết kết nối được.
+ *
+ * Không tự gọi theo chu kỳ: renderer nạp khi mở màn chat, khi đổi Alice, sau khi
+ * đăng nhập xong, và khi bấm nút Làm mới. `claude auth status` là một tiến trình
+ * con — gọi mỗi vài giây là đốt CPU cho một thứ gần như không bao giờ đổi.
+ */
+ipcMain.handle('alice:connection:info', async (_e, id) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  const alice = registry.alices.find((a) => a.id === id) || currentAlice();
+  if (!alice) return { error: 'Chưa có Alice nào.' };
+  const base = aliceDirFor(alice.id);
+  const picked = modelFor(alice);
+
+  const out = {
+    provider: alice.provider || 'opencode',
+    model: picked.model,
+    configuredModel: alice.model || null,
+    warning: picked.warning,
+    claude: null,
+    opencode: null,
+  };
+
+  if (out.provider === 'claude') {
+    out.claude = await claudeAuthStatus(alice.id);
+  } else {
+    const st = auth.authStatus(base);
+    out.opencode = {
+      configured: st.configured,
+      // Chỉ tên provider + 4 số cuối — xem chú thích ở `auth.keyTails`.
+      keys: auth.keyTails(base),
+      binary: engine && engine.binSource === 'bundled' ? 'kèm theo app' : 'cài trên máy',
+      available: Boolean(engine && engine.available),
+    };
+  }
+  return out;
+});
+
+/** `claude auth status` với `CLAUDE_CONFIG_DIR` cô lập của một Alice. Tách ra vì
+ * cả IPC `alice:claude:status` lẫn panel Kết nối đều cần đúng một thứ. */
+function claudeAuthStatus(id) {
+  const configDir = registryModule.claudeConfigDir(aliceDirFor(id));
   return new Promise((resolve) => {
     execFile('claude', ['auth', 'status'], {
       env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }, timeout: 10000,
@@ -505,7 +582,7 @@ ipcMain.handle('alice:claude:status', async (_e, id) => {
       try { resolve(JSON.parse(stdout)); } catch { resolve({ loggedIn: false }); }
     });
   });
-});
+}
 
 /**
  * Mở luồng đăng nhập Claude CHO Bệ hạ — tự spawn `claude auth login`, tự mở trình
@@ -714,7 +791,7 @@ function publicServerFor(id) {
     // Alice nhưng hai tiến trình engine khác nhau chạy song song (app + public).
     const pubEngine = engineFor(alice, settings);
     pubEngine.setBaseDir(base);
-    pubEngine.settings = { ...settings, model: alice.model || null };
+    pubEngine.settings = { ...settings, model: modelFor(alice).model };
     pub = new PublicServer({
       alice,
       baseDir: base,
@@ -1092,6 +1169,25 @@ ipcMain.handle('alice:chat:clear', async () => {
   return { ok: true };
 });
 
+/**
+ * Xoá ĐÚNG MỘT tin khỏi kho của app.
+ *
+ * Chỉ trong phạm vi cuộc trò chuyện ĐANG MỞ — một id lạc từ renderer không xoá
+ * được tin của cuộc khác. Session engine vẫn còn nhớ câu này tới lần xoay session
+ * kế tiếp; UI phải nói ra điều đó trước khi xoá.
+ */
+ipcMain.handle('alice:message:remove', async (_e, id) => {
+  const boom = await ready();
+  if (boom) return { error: `App chưa khởi động được: ${boom}` };
+  if (!store) return { error: 'Chưa có Alice nào.' };
+  const conv = store.currentConversation();
+  if (!conv) return { error: 'Chưa có cuộc trò chuyện nào.' };
+  const removed = store.removeMessage(conv.id, id);
+  if (!removed) return { error: 'Không tìm thấy tin nhắn đó trong cuộc trò chuyện này.' };
+  log.info(`message removed: #${id} (conversation ${conv.id})`);
+  return { ok: true };
+});
+
 // ── lịch hẹn (của Alice đang mở) ───────────────────────────────────────────
 
 ipcMain.handle('alice:sched:list', async () => {
@@ -1099,15 +1195,26 @@ ipcMain.handle('alice:sched:list', async () => {
   return store ? store.listSchedules() : [];
 });
 
+/** Giờ:phút hợp lệ chưa — dùng chung cho `add` và `update`. Bản trước chỉ kiểm ở
+ * `add`, nên sửa một lịch đang chạy thành `99:99` là nó im lặng không bao giờ tới
+ * giờ nữa (`isDue` so bằng `===`), mà UI vẫn hiện như một lịch bình thường. */
+function badTime(hour, minute) {
+  const h = Number(hour);
+  const m = Number(minute);
+  if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
+    return 'Giờ phải là số từ 0–23, phút từ 0–59.';
+  }
+  return null;
+}
+
 ipcMain.handle('alice:sched:add', async (_e, { hour, minute, task }) => {
   const boom = await ready();
   if (boom) return { error: `App chưa khởi động được: ${boom}` };
   if (!store) return { error: 'Chưa có Alice nào.' };
   const h = Number(hour);
   const m = Number(minute);
-  if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
-    return { error: 'Giờ phải là số từ 0–23, phút từ 0–59.' };
-  }
+  const bad = badTime(hour, minute);
+  if (bad) return { error: bad };
   const text = String(task || '').trim();
   if (!text) return { error: 'Chưa nhập việc cần làm.' };
   const sched = store.addSchedule({ hour: h, minute: m, task: text });
@@ -1121,6 +1228,17 @@ ipcMain.handle('alice:sched:update', async (_e, id, patch) => {
   if (!store) return { error: 'Chưa có Alice nào.' };
   if (patch.task !== undefined) patch.task = String(patch.task || '').trim();
   if (patch.task === '') return { error: 'Việc cần làm không được để trống.' };
+  if (patch.hour !== undefined || patch.minute !== undefined) {
+    const cur = store.getSchedule(Number(id));
+    if (!cur) return { error: 'Không tìm thấy lịch hẹn.' };
+    const bad = badTime(
+      patch.hour !== undefined ? patch.hour : cur.hour,
+      patch.minute !== undefined ? patch.minute : cur.minute
+    );
+    if (bad) return { error: bad };
+    if (patch.hour !== undefined) patch.hour = Number(patch.hour);
+    if (patch.minute !== undefined) patch.minute = Number(patch.minute);
+  }
   const sched = store.updateSchedule(Number(id), patch);
   if (!sched) return { error: 'Không tìm thấy lịch hẹn.' };
   return { sched };
@@ -1161,9 +1279,15 @@ ipcMain.handle('alice:settings:set', async (_e, patch) => {
   settings = config.saveSettings({ ...settings, ...patch });
   // Model là của RIÊNG Alice — settings chung không được ghi đè model đang dùng.
   const alice = currentAlice();
-  engine.settings = { ...settings, model: (alice && alice.model) || null };
+  const picked = modelFor(alice);
+  modelWarning = picked.warning;
+  engine.settings = { ...settings, model: picked.model };
   if (memory) memory.settings = settings;
-  provisionWorkspace(settings, { brainMcp: brain && brain.available ? brain.mcpConfig() : null });
+  provisionWorkspace(settings, {
+    brainMcp: brain && brain.available ? brain.mcpConfig() : null,
+    dir: registry.active ? path.join(aliceDirFor(registry.active), 'workspace') : null,
+    model: alice && alice.provider === 'claude' ? null : picked.model,
+  });
   return settings;
 });
 

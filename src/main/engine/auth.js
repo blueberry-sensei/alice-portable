@@ -88,6 +88,29 @@ function setApiKey(provider, key, baseDir) {
   return authStatus(baseDir);
 }
 
+/**
+ * BỐN ký tự cuối của mỗi chìa khoá — không bao giờ nhiều hơn.
+ *
+ * D-0004 ("không bao giờ trả giá trị key ra khỏi main") vẫn giữ nguyên; đây là một
+ * ngoại lệ HẸP do Bệ hạ yêu cầu (2026-08-14). Lý do có thật: một người có nhiều
+ * chìa khoá opencode nhìn giống hệt nhau, và khi Alice không chạy được thì câu hỏi
+ * đầu tiên luôn là "nó đang dùng chìa khoá nào?" — mà không có cách nào trả lời.
+ * Bốn ký tự cuối đủ để phân biệt và không đủ để dùng lại, đúng cách ngân hàng in
+ * số thẻ. Phần đầu của key KHÔNG bao giờ rời khỏi hàm này.
+ */
+function keyTails(baseDir) {
+  const { authFile } = portableDirs(baseDir);
+  try {
+    const data = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+    return Object.entries(data).map(([provider, v]) => ({
+      provider,
+      tail: String((v && v.key) || '').slice(-4) || null,
+    }));
+  } catch {
+    return []; // chưa có file — đúng ở lần chạy đầu
+  }
+}
+
 module.exports = {
-  portableDirs, portableEnv, authStatus, setApiKey, seedConfigDir,
+  portableDirs, portableEnv, authStatus, setApiKey, seedConfigDir, keyTails,
 };
