@@ -147,7 +147,13 @@ async function chatMessages({ credentialsPath, space, since, chatBaseUrl = 'http
     return { error: 'File service account thiếu client_email/private_key/token_uri.' };
   }
 
-  const tok = await serviceAccountToken(cred, ['https://www.googleapis.com/auth/chat.messages.readonly']);
+  // `chat.bot` (app-authentication, KHÔNG cần domain-wide delegation) — cố ý
+  // không dùng `chat.messages.readonly`: đó là "restricted scope", app-auth với
+  // scope đó cần Workspace admin phê duyệt một lần qua Marketplace SDK trước khi
+  // gọi được (xem developers.google.com/workspace/chat/authenticate-authorize —
+  // bảng OAuth scope, cột "App authentication approval"). `chat.bot` không cần
+  // bước đó, chỉ cần app đã là thành viên của space.
+  const tok = await serviceAccountToken(cred, ['https://www.googleapis.com/auth/chat.bot']);
   if (tok.error) return tok;
 
   // `space` chấp nhận cả "spaces/AAAA..." lẫn id trần.
